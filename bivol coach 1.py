@@ -78,6 +78,18 @@ HOOK_ANGLE_MIN  = 50     # 훅: 팔꿈치 최소 각도
 HOOK_ANGLE_MAX  = 110    # 훅: 팔꿈치 최대 각도 (65→110, z/x 조건이 직선타 걸러줌)
 PUNCH_COOLDOWN  = 0.75   # 같은 손 재감지 방지 (초)
 
+# ── 어퍼컷 감지 ───────────────────────────────────────────────────────────────
+UPPERCUT_Y_THRESH  = 0.18   # sw 대비 손목 상향 이동 비율
+UPPERCUT_ANGLE_MIN = 50     # 팔꿈치 최소 각도 (굽힘)
+UPPERCUT_ANGLE_MAX = 120    # 팔꿈치 최대 각도
+
+# ── 캘리브레이션 ─────────────────────────────────────────────────────────────
+_CALIB_DURATION = 7.0        # 캘리브레이션 시간 (초)
+_calib_start    = None
+_calib_j_vals   = []
+_calib_c_vals   = []
+_calib_done     = False
+
 # ── 카메라 앵글 자동감지 ──────────────────────────────────────────────────────
 # shoulder_w 기준: 정면이면 넓고 측면이면 좁아짐
 FRONT_SW  = 0.11   # shoulder_w ≥ → 정면 모드 (0.08→0.11, 더 일찍 앵글 감지)
@@ -90,7 +102,7 @@ _jab_dist_hist   = deque(maxlen=12)  # 잽손 팔 펴짐 거리 히스토리
 _cross_dist_hist = deque(maxlen=12)  # 크로스손 팔 펴짐 거리 히스토리
 _last_pt    = {"jab": 0.0, "cross": 0.0}
 _pdisplay   = {"text": "", "col": (255, 255, 255), "until": 0.0}
-_pstats     = {"원(잽)": 0, "투(크로스)": 0, "훅": 0}
+_pstats     = {"원(잽)": 0, "투(크로스)": 0, "훅": 0, "어퍼컷": 0}
 _show_debug = True   # D키로 토글
 _show_guide = True   # G키로 토글
 _dbg = {             # 실시간 감지값
@@ -108,7 +120,8 @@ _TRAIL_COLORS = {
     'side':  (0,  200, 200),
     'jab':   (0,  255,  80),
     'cross': (255, 80,   0),
-    'hook':  (0,  180, 255),
+    'hook':     (0,  180, 255),
+    'uppercut': (180,  0, 255),
 }
 class _TrailBuf:
     """펀치 궤적 버퍼 - 위치+상태 저장, 과거 항목 상태 갱신 가능"""
@@ -170,7 +183,7 @@ def angle3pt(a, b, c):
 
 def detect_punch(lms, now):
     """펀치 감지 – 팔 펴짐 거리 기반 (Z축 폐기, shoulder_w 비례 동적 임계)"""
-    global _view_mode
+    global _view_mode, _calib_start, _calib_done, DYN_EXTEND_THRESH
     jw, je, js = _JAB_IDX
     cw, ce, cs = _CROSS_IDX
 
@@ -207,6 +220,18 @@ def detect_punch(lms, now):
     c_arm_len = float(dist(c_sh, c_wr)) / sw
     _jab_dist_hist.append(j_arm_len)
     _cross_dist_hist.append(c_arm_len)
+
+    # ── 캘리브레이션 데이터 수집 ──────────────────────────────────────────────
+    if not _calib_done:
+        if _calib_start is None:
+            _calib_start = now
+        _calib_j_vals.append(j_arm_len)
+        _calib_c_vals.append(c_arm_len)
+        if now - _calib_start >= _CALIB_DURATION and len(_calib_j_vals) > 10:
+            max_ext = max(max(_calib_j_vals), max(_calib_c_vals))
+            if max_ext > DYN_EXTEND_THRESH * 1.2:   # 유효한 펀치 데이터가 있을 때만 업데이트
+                DYN_EXTEND_THRESH = max_ext * 0.60
+            _calib_done = True
 
     if len(_jab_dist_hist) < 7:
         return
@@ -255,7 +280,7 @@ def detect_punch(lms, now):
         _pdisplay["until"] = now + 1.5
         _last_pt[key]      = now
         trail = _jab_trail if key == "jab" else _cross_trail
-        state = "jab" if "잽" in ptype else "cross" if "크로스" in ptype else "hook"
+        state = "jab" if "잽" in ptype else "cross" if "크로스" in ptype else "uppercut" if "어퍼" in ptype else "hook"
         trail.mark_last(12, state)
 
     # ── 잽손 ──────────────────────────────────────────────────────────────────
@@ -268,6 +293,13 @@ def detect_punch(lms, now):
                 # 손목이 어깨 높이 근처에 있어야 훅 (위아래 스윙 방지)
                 if abs(j_wr[1] - j_sh[1]) < 0.22:
                     fire("jab", "훅", guard_ok(c_wr))
+        else:
+            # 어퍼컷: 손목이 위로 올라오고 팔꿈치가 굽혀진 상태
+            j_yn_up = float(_jab_hist[-5][1] - _jab_hist[-1][1]) / sw
+            if j_yn_up > UPPERCUT_Y_THRESH:
+                if UPPERCUT_ANGLE_MIN <= j_el_ang <= UPPERCUT_ANGLE_MAX:
+                    if float(_jab_hist[-5][1]) > nose[1]:   # 시작 위치가 코 아래
+                        fire("jab", "어퍼컷", guard_ok(c_wr))
 
     # ── 크로스손 ──────────────────────────────────────────────────────────────
     if now - _last_pt["cross"] > PUNCH_COOLDOWN:
@@ -278,6 +310,12 @@ def detect_punch(lms, now):
             if HOOK_ANGLE_MIN <= c_el_ang <= HOOK_ANGLE_MAX:
                 if abs(c_wr[1] - c_sh[1]) < 0.22:
                     fire("cross", "훅", guard_ok(j_wr))
+        else:
+            c_yn_up = float(_cross_hist[-5][1] - _cross_hist[-1][1]) / sw
+            if c_yn_up > UPPERCUT_Y_THRESH:
+                if UPPERCUT_ANGLE_MIN <= c_el_ang <= UPPERCUT_ANGLE_MAX:
+                    if float(_cross_hist[-5][1]) > nose[1]:
+                        fire("cross", "어퍼컷", guard_ok(j_wr))
 
 
 def draw_punch_ui(frame, now):
@@ -287,7 +325,7 @@ def draw_punch_ui(frame, now):
     # 펀치 카운트 패널 (오른쪽 상단)
     px = w - 200
     overlay = frame.copy()
-    cv2.rectangle(overlay, (px - 5, 5), (w - 5, 140), (20, 20, 20), -1)
+    cv2.rectangle(overlay, (px - 5, 5), (w - 5, 168), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
     cv2.putText(frame, "PUNCH COUNT", (px, 22),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
@@ -388,11 +426,11 @@ def draw_punch_trails(frame, lms, fw, fh):
 
     # ── 범례 (오른쪽 하단) ──────────────────────────────────────────────────
     legend = [("원(잽)", 'jab'), ("투(크로스)", 'cross'), ("훅", 'hook'),
-              ("전진방향", 'fwd'), ("측면방향", 'side')]
+              ("어퍼컷", 'uppercut'), ("전진방향", 'fwd'), ("측면방향", 'side')]
     for i, (txt, key) in enumerate(legend):
         col = _TRAIL_COLORS[key]
         lx  = fw - 130
-        ly  = fh - 125 + i * 22
+        ly  = fh - 147 + i * 22
         cv2.circle(frame, (lx, ly), 5, col, -1)
         cv2.putText(frame, txt, (lx + 12, ly + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, col, 1)
@@ -693,6 +731,20 @@ with vision.PoseLandmarker.create_from_options(options) as landmarker:
         if _show_debug:
             draw_debug_ui(frame)
 
+        # ── 캘리브레이션 UI ────────────────────────────────────────────────────
+        if not _calib_done:
+            h_f, w_f = frame.shape[:2]
+            elapsed  = (now - _calib_start) if _calib_start else 0.0
+            remain   = max(0.0, _CALIB_DURATION - elapsed)
+            ov2 = frame.copy()
+            cv2.rectangle(ov2, (w_f//4, h_f//2 - 45), (w_f*3//4, h_f//2 + 45), (0, 0, 0), -1)
+            cv2.addWeighted(ov2, 0.75, frame, 0.25, 0, frame)
+            put_kr(frame, "캘리브레이션: 잽·크로스를 몇 번 던져주세요!",
+                   (w_f//4 + 10, h_f//2 - 32), (0, 255, 200), _KR_SM)
+            cv2.putText(frame, f"남은 시간: {remain:.1f}s  (건너뛰려면 C키)",
+                        (w_f//4 + 10, h_f//2 + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+
         cv2.imshow('Bivol AI Coach 1 (+Punch)', frame)
         key = cv2.waitKey(10) & 0xFF
         if key == ord('q'):
@@ -703,6 +755,8 @@ with vision.PoseLandmarker.create_from_options(options) as landmarker:
             _show_trail = not _show_trail
         elif key == ord('g'):
             _show_guide = not _show_guide
+        elif key == ord('c'):
+            _calib_done = True   # 캘리브레이션 건너뛰기
 
 cap.release()
 cv2.destroyAllWindows()
