@@ -70,6 +70,23 @@ HOOK_ANGLE_MIN  = 50     # 훅: 팔꿈치 최소 각도
 HOOK_ANGLE_MAX  = 110    # 훅: 팔꿈치 최대 각도 (67→110)
 PUNCH_COOLDOWN  = 0.75   # 같은 손 재감지 방지 (초)
 
+# ── 어퍼컷 감지 ───────────────────────────────────────────────────────────────
+UPPERCUT_Y_THRESH  = 0.18
+UPPERCUT_ANGLE_MIN = 50
+UPPERCUT_ANGLE_MAX = 120
+
+# ── 캘리브레이션 ─────────────────────────────────────────────────────────────
+_CALIB_DURATION = 7.0
+_calib_start    = None
+_calib_j_vals   = []
+_calib_c_vals   = []
+_calib_done     = False
+
+# ── 시작 준비 체크 ────────────────────────────────────────────────────────────
+_READY_FRAMES   = 20
+_pose_stable    = 0
+_pose_ready     = False
+
 # ── 카메라 앵글 자동감지 ──────────────────────────────────────────────────────
 FRONT_SW  = 0.11
 SIDE_SW   = 0.05
@@ -81,7 +98,7 @@ _jab_dist_hist   = deque(maxlen=12)  # 잽손 팔 펴짐 거리 히스토리
 _cross_dist_hist = deque(maxlen=12)  # 크로스손 팔 펴짐 거리 히스토리
 _last_pt    = {"jab": 0.0, "cross": 0.0}
 _pdisplay   = {"text": "", "col": (255, 255, 255), "until": 0.0}
-_pstats     = {"원(잽)": 0, "투(크로스)": 0, "훅": 0}
+_pstats     = {"원(잽)": 0, "투(크로스)": 0, "훅": 0, "어퍼컷": 0}
 _show_debug = True
 _show_guide = True   # G키로 토글
 _dbg = {
@@ -95,7 +112,8 @@ _TRAIL_COLORS = {
     'side':  (0,  200, 200),
     'jab':   (0,  255,  80),
     'cross': (255, 80,   0),
-    'hook':  (0,  180, 255),
+    'hook':     (0,  180, 255),
+    'uppercut': (180,  0, 255),
 }
 class _TrailBuf:
     def __init__(self, n=25):
@@ -154,7 +172,7 @@ def angle3pt(a, b, c):
 
 def detect_punch(lms, now):
     """펀치 감지 – 팔 펴짐 거리 기반 (Z축 폐기, shoulder_w 비례 동적 임계)"""
-    global _view_mode
+    global _view_mode, _calib_start, _calib_done, DYN_EXTEND_THRESH
     jw, je, js = _JAB_IDX
     cw, ce, cs = _CROSS_IDX
 
@@ -174,7 +192,7 @@ def detect_punch(lms, now):
     if sw_raw >= FRONT_SW:      target = 0.0
     elif sw_raw <= SIDE_SW:     target = 1.0
     else:                       target = (FRONT_SW - sw_raw) / (FRONT_SW - SIDE_SW)
-    _view_mode = _view_mode * 0.85 + target * 0.15
+    _view_mode = _view_mode * 0.70 + target * 0.30
     side = _view_mode
 
     sh_mid_x     = (l_sh_[0] + r_sh_[0]) / 2
@@ -191,20 +209,36 @@ def detect_punch(lms, now):
     _jab_dist_hist.append(j_arm_len)
     _cross_dist_hist.append(c_arm_len)
 
+    # ── 캘리브레이션 데이터 수집 ──────────────────────────────────────────────
+    if not _calib_done:
+        if _calib_start is None:
+            _calib_start = now
+        _calib_j_vals.append(j_arm_len)
+        _calib_c_vals.append(c_arm_len)
+        if now - _calib_start >= _CALIB_DURATION and len(_calib_j_vals) > 10:
+            max_ext = max(max(_calib_j_vals), max(_calib_c_vals))
+            if max_ext > DYN_EXTEND_THRESH * 1.2:
+                DYN_EXTEND_THRESH = max_ext * 0.60
+            _calib_done = True
+
     if len(_jab_dist_hist) < 7:
         return
 
     # 롤링 맥스: 최근 3프레임 중 최대 확장값 (노이즈 감소)
-    j_extend = max(
+    j_extend_2d = max(
         float(_jab_dist_hist[-1] - _jab_dist_hist[-7]),
         float(_jab_dist_hist[-2] - _jab_dist_hist[-8]) if len(_jab_dist_hist) >= 8 else 0,
         float(_jab_dist_hist[-3] - _jab_dist_hist[-9]) if len(_jab_dist_hist) >= 9 else 0,
     )
-    c_extend = max(
+    c_extend_2d = max(
         float(_cross_dist_hist[-1] - _cross_dist_hist[-7]),
         float(_cross_dist_hist[-2] - _cross_dist_hist[-8]) if len(_cross_dist_hist) >= 8 else 0,
         float(_cross_dist_hist[-3] - _cross_dist_hist[-9]) if len(_cross_dist_hist) >= 9 else 0,
     )
+    j_z_fwd = max(0.0, float(_jab_hist[-7][2]   - _jab_hist[-1][2]))   / sw
+    c_z_fwd = max(0.0, float(_cross_hist[-7][2] - _cross_hist[-1][2])) / sw
+    j_extend = j_extend_2d * (1 - side) + j_z_fwd * side
+    c_extend = c_extend_2d * (1 - side) + c_z_fwd * side
 
     # ── 훅: 손목 스윙 (sw 정규화) ─────────────────────────────────────────────
     j_xn = abs(float(_jab_hist[-1][0]   - _jab_hist[-5][0])) / sw
@@ -238,7 +272,7 @@ def detect_punch(lms, now):
         _pdisplay["until"] = now + 1.5
         _last_pt[key]      = now
         trail = _jab_trail if key == "jab" else _cross_trail
-        state = "jab" if "잽" in ptype else "cross" if "크로스" in ptype else "hook"
+        state = "jab" if "잽" in ptype else "cross" if "크로스" in ptype else "uppercut" if "어퍼" in ptype else "hook"
         trail.mark_last(12, state)
 
     # ── 잽손 ──────────────────────────────────────────────────────────────────
@@ -246,27 +280,43 @@ def detect_punch(lms, now):
         if j_extend > DYN_EXTEND_THRESH:
             if j_el_ang >= STRAIGHT_ANGLE:
                 fire("jab", "원(잽)", guard_ok(c_wr))
-        elif j_hook_n > DYN_HOOK_THRESH:
-            if HOOK_ANGLE_MIN <= j_el_ang <= HOOK_ANGLE_MAX:
-                if abs(j_wr[1] - j_sh[1]) < 0.22:
-                    fire("jab", "훅", guard_ok(c_wr))
+        elif j_extend < DYN_EXTEND_THRESH * 0.35:
+            if j_hook_n > DYN_HOOK_THRESH:
+                if HOOK_ANGLE_MIN <= j_el_ang <= HOOK_ANGLE_MAX:
+                    if abs(j_wr[1] - j_sh[1]) < 0.20:
+                        if j_xn > j_yn * 1.5:
+                            fire("jab", "훅", guard_ok(c_wr))
+            else:
+                j_yn_up = float(_jab_hist[-5][1] - _jab_hist[-1][1]) / sw
+                if j_yn_up > UPPERCUT_Y_THRESH * 1.3:
+                    if UPPERCUT_ANGLE_MIN <= j_el_ang <= UPPERCUT_ANGLE_MAX:
+                        if float(_jab_hist[-5][1]) > (nose[1] + 0.05):
+                            fire("jab", "어퍼컷", guard_ok(c_wr))
 
     # ── 크로스손 ──────────────────────────────────────────────────────────────
     if now - _last_pt["cross"] > PUNCH_COOLDOWN:
         if c_extend > DYN_EXTEND_THRESH:
             if c_el_ang >= STRAIGHT_ANGLE:
                 fire("cross", "투(크로스)", guard_ok(j_wr))
-        elif c_hook_n > DYN_HOOK_THRESH:
-            if HOOK_ANGLE_MIN <= c_el_ang <= HOOK_ANGLE_MAX:
-                if abs(c_wr[1] - c_sh[1]) < 0.22:
-                    fire("cross", "훅", guard_ok(j_wr))
+        elif c_extend < DYN_EXTEND_THRESH * 0.35:
+            if c_hook_n > DYN_HOOK_THRESH:
+                if HOOK_ANGLE_MIN <= c_el_ang <= HOOK_ANGLE_MAX:
+                    if abs(c_wr[1] - c_sh[1]) < 0.20:
+                        if c_xn > c_yn * 1.5:
+                            fire("cross", "훅", guard_ok(j_wr))
+            else:
+                c_yn_up = float(_cross_hist[-5][1] - _cross_hist[-1][1]) / sw
+                if c_yn_up > UPPERCUT_Y_THRESH * 1.3:
+                    if UPPERCUT_ANGLE_MIN <= c_el_ang <= UPPERCUT_ANGLE_MAX:
+                        if float(_cross_hist[-5][1]) > (nose[1] + 0.05):
+                            fire("cross", "어퍼컷", guard_ok(j_wr))
 
 
 def draw_punch_ui(frame, now):
     h, w = frame.shape[:2]
     px = w - 200
     overlay = frame.copy()
-    cv2.rectangle(overlay, (px - 5, 5), (w - 5, 140), (20, 20, 20), -1)
+    cv2.rectangle(overlay, (px - 5, 5), (w - 5, 168), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
     cv2.putText(frame, "PUNCH COUNT", (px, 22),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
@@ -437,10 +487,11 @@ def draw_punch_trails(frame, lms, fw, fh):
     cond_text(c_px, _dbg["c_ext"], _dbg["c_el_ang"], _dbg["c_hook_n"])
 
     legend = [("원(잽)", 'jab'), ("투(크로스)", 'cross'), ("훅", 'hook'),
-              ("전진방향", 'fwd'), ("측면방향", 'side')]
+              ("어퍼컷", 'uppercut'), ("전진방향", 'fwd'), ("측면방향", 'side')]
     for i, (txt, key) in enumerate(legend):
         col = _TRAIL_COLORS[key]
-        lx  = fw - 130;  ly = fh - 125 + i * 22
+        lx  = fw - 130
+        ly  = fh - 147 + i * 22
         cv2.circle(frame, (lx, ly), 5, col, -1)
         cv2.putText(frame, txt, (lx + 12, ly + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, col, 1)
 
@@ -466,7 +517,8 @@ def score_bar(image, x, y, score, label, color):
 cap             = cv2.VideoCapture(0)
 ankle_y_history = []
 frame_count     = 0
-print("가르시아 코치 1 (원투훅 감지 포함) 활성화! 종료: Q")
+print("가르시아 코치 1 (원투훅어퍼컷 감지 포함) 활성화! 종료: Q")
+print("정면/사선/측면 모두 자동 감지됩니다.")
 
 with vision.PoseLandmarker.create_from_options(options) as landmarker:
     while cap.isOpened():
@@ -486,6 +538,73 @@ with vision.PoseLandmarker.create_from_options(options) as landmarker:
 
         results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
+        # ── 포즈 안정 감지 체크 ───────────────────────────────────────────────
+        if results.pose_landmarks and len(results.pose_landmarks) > 0:
+            _pose_stable = min(_pose_stable + 1, _READY_FRAMES)
+        else:
+            _pose_stable = max(_pose_stable - 2, 0)
+        if _pose_stable >= _READY_FRAMES:
+            _pose_ready = True
+
+        # ── 준비 안 됐으면 준비 화면 표시 후 계속 ─────────────────────────────
+        if not _pose_ready:
+            h_rdy, w_rdy = frame.shape[:2]
+
+            # 포즈 감지되면 뼈대 표시 + 앵글 미리 계산
+            if results.pose_landmarks and len(results.pose_landmarks) > 0:
+                _lms_rdy = results.pose_landmarks[0]
+                draw_skeleton(frame, _lms_rdy)
+                _l_sh_rdy = lm(_lms_rdy, 11)
+                _r_sh_rdy = lm(_lms_rdy, 12)
+                _sw_rdy = float(np.linalg.norm(_l_sh_rdy[:2] - _r_sh_rdy[:2]))
+                if _sw_rdy >= FRONT_SW:    _tgt = 0.0
+                elif _sw_rdy <= SIDE_SW:   _tgt = 1.0
+                else:                      _tgt = (FRONT_SW - _sw_rdy) / (FRONT_SW - SIDE_SW)
+                _view_mode = _view_mode * 0.70 + _tgt * 0.30
+
+            ov_rdy = frame.copy()
+            cv2.rectangle(ov_rdy, (0, 0), (w_rdy, h_rdy), (0, 0, 0), -1)
+            cv2.addWeighted(ov_rdy, 0.5, frame, 0.5, 0, frame)
+
+            # 카메라 앵글 실시간 표시
+            side_pct = int(_view_mode * 100)
+            if side_pct < 25:
+                angle_txt, angle_col = f"정면 ({100-side_pct}%)", (0, 255, 100)
+            elif side_pct < 60:
+                angle_txt, angle_col = f"사선 ({side_pct}%)", (0, 200, 255)
+            else:
+                angle_txt, angle_col = f"측면 ({side_pct}%)", (0, 165, 255)
+
+            put_kr(frame, "GARCIA AI COACH", (w_rdy//2 - 130, 40), (0, 180, 60), _KR_MD)
+            put_kr(frame, f"카메라 각도: {angle_txt}", (w_rdy//2 - 120, h_rdy//2 - 60),
+                   angle_col, _KR_MD)
+
+            # 감지 진행 바
+            bar_x, bar_y = w_rdy//4, h_rdy//2
+            bar_w_px = w_rdy//2
+            progress = _pose_stable / _READY_FRAMES
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w_px, bar_y + 16), (50, 50, 50), -1)
+            cv2.rectangle(frame, (bar_x, bar_y),
+                          (bar_x + int(bar_w_px * progress), bar_y + 16),
+                          (0, 200, 255), -1)
+
+            if _pose_stable == 0:
+                status_txt = "카메라 앞에 서주세요..."
+                status_col = (0, 100, 255)
+            else:
+                status_txt = f"감지 중... ({int(progress*100)}%)"
+                status_col = (0, 200, 255)
+            put_kr(frame, status_txt, (w_rdy//2 - 90, h_rdy//2 + 25), status_col, _KR_SM)
+            put_kr(frame, "정면 / 사선 / 측면 모두 가능합니다",
+                   (w_rdy//2 - 130, h_rdy//2 + 60), (140, 140, 140), _KR_SM)
+
+            cv2.imshow('Garcia AI Coach 1 (+Punch)', frame)
+            key = cv2.waitKey(10) & 0xFF
+            if key == ord('q'):
+                break
+            continue
+
+        # 배경 패널 (준비 완료 후에만)
         overlay = frame.copy()
         cv2.rectangle(overlay, (5, 5), (310, 310), (20, 20, 20), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
@@ -613,6 +732,20 @@ with vision.PoseLandmarker.create_from_options(options) as landmarker:
         draw_punch_ui(frame, now)
         draw_debug_ui(frame)
 
+        # ── 캘리브레이션 UI ────────────────────────────────────────────────────
+        if not _calib_done:
+            h_f, w_f = frame.shape[:2]
+            elapsed  = (now - _calib_start) if _calib_start else 0.0
+            remain   = max(0.0, _CALIB_DURATION - elapsed)
+            ov2 = frame.copy()
+            cv2.rectangle(ov2, (w_f//4, h_f//2 - 45), (w_f*3//4, h_f//2 + 45), (0, 0, 0), -1)
+            cv2.addWeighted(ov2, 0.75, frame, 0.25, 0, frame)
+            put_kr(frame, "캘리브레이션: 잽·크로스를 몇 번 던져주세요!",
+                   (w_f//4 + 10, h_f//2 - 32), (0, 255, 200), _KR_SM)
+            cv2.putText(frame, f"남은 시간: {remain:.1f}s  (건너뛰려면 C키)",
+                        (w_f//4 + 10, h_f//2 + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+
         cv2.imshow('Garcia AI Coach 1 (+Punch)', frame)
         key = cv2.waitKey(10) & 0xFF
         if key == ord('q'):
@@ -623,6 +756,8 @@ with vision.PoseLandmarker.create_from_options(options) as landmarker:
             _show_debug = not _show_debug
         elif key == ord('g'):
             _show_guide = not _show_guide
+        elif key == ord('c'):
+            _calib_done = True
 
 cap.release()
 cv2.destroyAllWindows()

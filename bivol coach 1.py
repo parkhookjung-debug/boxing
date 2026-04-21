@@ -90,6 +90,11 @@ _calib_j_vals   = []
 _calib_c_vals   = []
 _calib_done     = False
 
+# ── 시작 준비 체크 ────────────────────────────────────────────────────────────
+_READY_FRAMES   = 20         # 연속 감지 프레임 수 (약 0.7초)
+_pose_stable    = 0          # 연속 감지 카운터
+_pose_ready     = False      # 준비 완료 플래그
+
 # ── 카메라 앵글 자동감지 ──────────────────────────────────────────────────────
 # shoulder_w 기준: 정면이면 넓고 측면이면 좁아짐
 FRONT_SW  = 0.11   # shoulder_w ≥ → 정면 모드 (0.08→0.11, 더 일찍 앵글 감지)
@@ -203,7 +208,7 @@ def detect_punch(lms, now):
     if sw_raw >= FRONT_SW:      target = 0.0
     elif sw_raw <= SIDE_SW:     target = 1.0
     else:                       target = (FRONT_SW - sw_raw) / (FRONT_SW - SIDE_SW)
-    _view_mode = _view_mode * 0.85 + target * 0.15
+    _view_mode = _view_mode * 0.70 + target * 0.30   # 사선/측면 빠른 적응
     side = _view_mode
 
     sh_mid_x     = (l_sh_[0] + r_sh_[0]) / 2
@@ -237,16 +242,25 @@ def detect_punch(lms, now):
         return
 
     # 롤링 맥스: 최근 3프레임 중 최대 확장값 (노이즈 감소)
-    j_extend = max(
+    j_extend_2d = max(
         float(_jab_dist_hist[-1] - _jab_dist_hist[-7]),
         float(_jab_dist_hist[-2] - _jab_dist_hist[-8]) if len(_jab_dist_hist) >= 8 else 0,
         float(_jab_dist_hist[-3] - _jab_dist_hist[-9]) if len(_jab_dist_hist) >= 9 else 0,
     )
-    c_extend = max(
+    c_extend_2d = max(
         float(_cross_dist_hist[-1] - _cross_dist_hist[-7]),
         float(_cross_dist_hist[-2] - _cross_dist_hist[-8]) if len(_cross_dist_hist) >= 8 else 0,
         float(_cross_dist_hist[-3] - _cross_dist_hist[-9]) if len(_cross_dist_hist) >= 9 else 0,
     )
+
+    # ── 사선/측면 Z축 전진 감지 ─────────────────────────────────────────────────
+    # 잽/크로스: 팔이 카메라 방향으로 뻗을수록 z 감소 → hist[-7].z - hist[-1].z > 0
+    j_z_fwd = max(0.0, float(_jab_hist[-7][2]   - _jab_hist[-1][2]))   / sw
+    c_z_fwd = max(0.0, float(_cross_hist[-7][2] - _cross_hist[-1][2])) / sw
+
+    # 정면이면 2D 위주, 측면이면 Z 위주로 블렌딩
+    j_extend = j_extend_2d * (1 - side) + j_z_fwd * side
+    c_extend = c_extend_2d * (1 - side) + c_z_fwd * side
 
     # ── 훅: 손목 스윙 (sw 정규화) ─────────────────────────────────────────────
     j_xn = abs(float(_jab_hist[-1][0]   - _jab_hist[-5][0])) / sw
@@ -286,36 +300,42 @@ def detect_punch(lms, now):
     # ── 잽손 ──────────────────────────────────────────────────────────────────
     if now - _last_pt["jab"] > PUNCH_COOLDOWN:
         if j_extend > DYN_EXTEND_THRESH:
+            # 잽/크로스: 전진이 충분할 때만
             if j_el_ang >= STRAIGHT_ANGLE:
                 fire("jab", "원(잽)", guard_ok(c_wr))
-        elif j_hook_n > DYN_HOOK_THRESH:
-            if HOOK_ANGLE_MIN <= j_el_ang <= HOOK_ANGLE_MAX:
-                # 손목이 어깨 높이 근처에 있어야 훅 (위아래 스윙 방지)
-                if abs(j_wr[1] - j_sh[1]) < 0.22:
-                    fire("jab", "훅", guard_ok(c_wr))
-        else:
-            # 어퍼컷: 손목이 위로 올라오고 팔꿈치가 굽혀진 상태
-            j_yn_up = float(_jab_hist[-5][1] - _jab_hist[-1][1]) / sw
-            if j_yn_up > UPPERCUT_Y_THRESH:
-                if UPPERCUT_ANGLE_MIN <= j_el_ang <= UPPERCUT_ANGLE_MAX:
-                    if float(_jab_hist[-5][1]) > nose[1]:   # 시작 위치가 코 아래
-                        fire("jab", "어퍼컷", guard_ok(c_wr))
+        elif j_extend < DYN_EXTEND_THRESH * 0.35:
+            # 훅/어퍼컷: 전진이 거의 없을 때만 체크 (잽 동작 중 오감지 방지)
+            if j_hook_n > DYN_HOOK_THRESH:
+                if HOOK_ANGLE_MIN <= j_el_ang <= HOOK_ANGLE_MAX:
+                    if abs(j_wr[1] - j_sh[1]) < 0.20:
+                        # 훅은 수평 이동이 수직 이동보다 커야 함
+                        if j_xn > j_yn * 1.5:
+                            fire("jab", "훅", guard_ok(c_wr))
+            else:
+                j_yn_up = float(_jab_hist[-5][1] - _jab_hist[-1][1]) / sw
+                if j_yn_up > UPPERCUT_Y_THRESH * 1.3:
+                    if UPPERCUT_ANGLE_MIN <= j_el_ang <= UPPERCUT_ANGLE_MAX:
+                        # 손목이 허리 아래에서 출발해야 어퍼컷
+                        if float(_jab_hist[-5][1]) > (nose[1] + 0.05):
+                            fire("jab", "어퍼컷", guard_ok(c_wr))
 
     # ── 크로스손 ──────────────────────────────────────────────────────────────
     if now - _last_pt["cross"] > PUNCH_COOLDOWN:
         if c_extend > DYN_EXTEND_THRESH:
             if c_el_ang >= STRAIGHT_ANGLE:
                 fire("cross", "투(크로스)", guard_ok(j_wr))
-        elif c_hook_n > DYN_HOOK_THRESH:
-            if HOOK_ANGLE_MIN <= c_el_ang <= HOOK_ANGLE_MAX:
-                if abs(c_wr[1] - c_sh[1]) < 0.22:
-                    fire("cross", "훅", guard_ok(j_wr))
-        else:
-            c_yn_up = float(_cross_hist[-5][1] - _cross_hist[-1][1]) / sw
-            if c_yn_up > UPPERCUT_Y_THRESH:
-                if UPPERCUT_ANGLE_MIN <= c_el_ang <= UPPERCUT_ANGLE_MAX:
-                    if float(_cross_hist[-5][1]) > nose[1]:
-                        fire("cross", "어퍼컷", guard_ok(j_wr))
+        elif c_extend < DYN_EXTEND_THRESH * 0.35:
+            if c_hook_n > DYN_HOOK_THRESH:
+                if HOOK_ANGLE_MIN <= c_el_ang <= HOOK_ANGLE_MAX:
+                    if abs(c_wr[1] - c_sh[1]) < 0.20:
+                        if c_xn > c_yn * 1.5:
+                            fire("cross", "훅", guard_ok(j_wr))
+            else:
+                c_yn_up = float(_cross_hist[-5][1] - _cross_hist[-1][1]) / sw
+                if c_yn_up > UPPERCUT_Y_THRESH * 1.3:
+                    if UPPERCUT_ANGLE_MIN <= c_el_ang <= UPPERCUT_ANGLE_MAX:
+                        if float(_cross_hist[-5][1]) > (nose[1] + 0.05):
+                            fire("cross", "어퍼컷", guard_ok(j_wr))
 
 
 def draw_punch_ui(frame, now):
@@ -570,6 +590,7 @@ cap         = cv2.VideoCapture(0)
 ankle_y_history = []
 frame_count = 0
 print("비볼 코치 1 (원투훅 감지 포함) 활성화! 종료: Q")
+print("정면/사선/측면 모두 자동 감지됩니다.")
 
 with vision.PoseLandmarker.create_from_options(options) as landmarker:
     while cap.isOpened():
@@ -589,7 +610,73 @@ with vision.PoseLandmarker.create_from_options(options) as landmarker:
 
         results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-        # 배경 패널
+        # ── 포즈 안정 감지 체크 ───────────────────────────────────────────────
+        if results.pose_landmarks and len(results.pose_landmarks) > 0:
+            _pose_stable = min(_pose_stable + 1, _READY_FRAMES)
+        else:
+            _pose_stable = max(_pose_stable - 2, 0)
+        if _pose_stable >= _READY_FRAMES:
+            _pose_ready = True
+
+        # ── 준비 안 됐으면 준비 화면 표시 후 계속 ─────────────────────────────
+        if not _pose_ready:
+            h_rdy, w_rdy = frame.shape[:2]
+
+            # 포즈 감지되면 뼈대 표시 + 앵글 미리 계산
+            if results.pose_landmarks and len(results.pose_landmarks) > 0:
+                _lms_rdy = results.pose_landmarks[0]
+                draw_skeleton(frame, _lms_rdy)
+                _l_sh_rdy = lm(_lms_rdy, 11)
+                _r_sh_rdy = lm(_lms_rdy, 12)
+                _sw_rdy = float(np.linalg.norm(_l_sh_rdy[:2] - _r_sh_rdy[:2]))
+                if _sw_rdy >= FRONT_SW:    _tgt = 0.0
+                elif _sw_rdy <= SIDE_SW:   _tgt = 1.0
+                else:                      _tgt = (FRONT_SW - _sw_rdy) / (FRONT_SW - SIDE_SW)
+                _view_mode = _view_mode * 0.70 + _tgt * 0.30
+
+            ov_rdy = frame.copy()
+            cv2.rectangle(ov_rdy, (0, 0), (w_rdy, h_rdy), (0, 0, 0), -1)
+            cv2.addWeighted(ov_rdy, 0.5, frame, 0.5, 0, frame)
+
+            # 카메라 앵글 실시간 표시
+            side_pct = int(_view_mode * 100)
+            if side_pct < 25:
+                angle_txt, angle_col = f"정면 ({100-side_pct}%)", (0, 255, 100)
+            elif side_pct < 60:
+                angle_txt, angle_col = f"사선 ({side_pct}%)", (0, 200, 255)
+            else:
+                angle_txt, angle_col = f"측면 ({side_pct}%)", (0, 165, 255)
+
+            put_kr(frame, "BIVOL AI COACH", (w_rdy//2 - 130, 40), (0, 200, 255), _KR_MD)
+            put_kr(frame, f"카메라 각도: {angle_txt}", (w_rdy//2 - 120, h_rdy//2 - 60),
+                   angle_col, _KR_MD)
+
+            # 감지 진행 바
+            bar_x, bar_y = w_rdy//4, h_rdy//2
+            bar_w_px = w_rdy//2
+            progress = _pose_stable / _READY_FRAMES
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w_px, bar_y + 16), (50, 50, 50), -1)
+            cv2.rectangle(frame, (bar_x, bar_y),
+                          (bar_x + int(bar_w_px * progress), bar_y + 16),
+                          (0, 200, 255), -1)
+
+            if _pose_stable == 0:
+                status_txt = "카메라 앞에 서주세요..."
+                status_col = (0, 100, 255)
+            else:
+                status_txt = f"감지 중... ({int(progress*100)}%)"
+                status_col = (0, 200, 255)
+            put_kr(frame, status_txt, (w_rdy//2 - 90, h_rdy//2 + 25), status_col, _KR_SM)
+            put_kr(frame, "정면 / 사선 / 측면 모두 가능합니다",
+                   (w_rdy//2 - 130, h_rdy//2 + 60), (140, 140, 140), _KR_SM)
+
+            cv2.imshow('Bivol AI Coach 1 (+Punch)', frame)
+            key = cv2.waitKey(10) & 0xFF
+            if key == ord('q'):
+                break
+            continue
+
+        # 배경 패널 (준비 완료 후에만)
         overlay = frame.copy()
         cv2.rectangle(overlay, (5, 5), (310, 310), (20, 20, 20), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
