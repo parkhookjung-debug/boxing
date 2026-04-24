@@ -102,6 +102,34 @@ if not DNA_LOADED:
     print("       먼저 'LIM data extraction.py' → 'LIM master average.py' 실행 필요")
     LIM = dict(_DEFAULTS)
 
+# ── Punch DNA 로드 ────────────────────────────────────────────────
+PUNCH_DNA_PATH = os.path.join(BASE_DIR, 'LIM_punch_DNA.csv')
+
+def load_punch_dna(path):
+    if not os.path.exists(path):
+        return {}
+    result = {}
+    with open(path, newline='') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            ptype = row['punch_type']
+            result[ptype] = {k: float(v) for k, v in row.items()
+                             if k not in ('punch_type', 'count')}
+    return result
+
+PUNCH_DNA       = load_punch_dna(PUNCH_DNA_PATH)
+PUNCH_DNA_LOADED = bool(PUNCH_DNA)
+if PUNCH_DNA_LOADED:
+    print(f"[펀치 DNA] 로드 완료: {list(PUNCH_DNA.keys())}")
+else:
+    print("[경고] LIM_punch_DNA.csv 없음 — 'LIM punch extraction.py' 실행 필요")
+
+PUNCH_TOL = {
+    'arm_extension': 0.10,
+    'elbow_angle'  : 25.0,
+    'lean_forward' : 0.10,
+}
+
 # ── 허용 오차 ─────────────────────────────────────────────────────
 TOL = {
     'guard_ydiff'   : 0.18,   # 손목 높이 허용 범위
@@ -232,6 +260,11 @@ POP_DURATION = 2.2
 
 # ── Ghost Form ────────────────────────────────────────────────────
 _show_ghost = True
+
+# ── Punch Form 분석 ───────────────────────────────────────────────
+_lm_buffer     = deque(maxlen=25)   # 최근 랜드마크 버퍼
+_pending_punch = []                  # [(countdown, punch_type), ...]
+EXTENSION_DELAY = 8                  # 속도 피크 후 분석까지 대기 프레임
 
 def give_feedback(key, text, color=(0, 200, 255)):
     now = time.time()
@@ -605,13 +638,13 @@ def update_trails(lms_raw):
     if lead_prev is not None:
         d = math.sqrt((lead_pos[0]-lead_prev[0])**2 + (lead_pos[1]-lead_prev[1])**2)
         if d > 0.07:
-            add_pop('p_jab', '잽 감지 ⚡  +8',
-                    lead_pos[0], lead_pos[1] - 0.06, (255, 220, 50), 2.5)
+            add_pop('p_jab', '잽 감지 ⚡', lead_pos[0], lead_pos[1] - 0.06, (255, 220, 50), 2.5)
+            _pending_punch.append([EXTENSION_DELAY, 'jab'])
     if rear_prev is not None:
         d = math.sqrt((rear_pos[0]-rear_prev[0])**2 + (rear_pos[1]-rear_prev[1])**2)
         if d > 0.07:
-            add_pop('p_cross', '크로스 감지 ⚡  +10',
-                    rear_pos[0], rear_pos[1] - 0.06, (255, 180, 50), 2.5)
+            add_pop('p_cross', '크로스 감지 ⚡', rear_pos[0], rear_pos[1] - 0.06, (255, 180, 50), 2.5)
+            _pending_punch.append([EXTENSION_DELAY, 'cross'])
 
     _prev_lwr = (lx, ly)
     _prev_rwr = (rx, ry)
@@ -688,6 +721,78 @@ def draw_score_pops(frame, w, h, now):
 
 
 # ══════════════════════════════════════════════════════════════════
+# Punch Form 분석 — DNA 비교 피드백
+# ══════════════════════════════════════════════════════════════════
+def analyse_punch_form(punch_type):
+    """버퍼에서 팔 최대 뻗음 시점을 찾아 PUNCH_DNA와 비교"""
+    if not PUNCH_DNA_LOADED or punch_type not in PUNCH_DNA:
+        return
+    buf = list(_lm_buffer)
+    if len(buf) < 3:
+        return
+
+    label = '잽' if punch_type == 'jab' else '크로스'
+    dna   = PUNCH_DNA[punch_type]
+
+    # 앞손/뒷손 판별 (버퍼 마지막 프레임 기준)
+    last = buf[-1]
+    lx, rx = last[15].x, last[16].x
+    if punch_type == 'jab':
+        wr_idx = 15 if lx < rx else 16
+    else:
+        wr_idx = 16 if lx < rx else 15
+    sh_idx = 11 if wr_idx == 15 else 12
+    el_idx = 13 if wr_idx == 15 else 14
+
+    # 버퍼에서 팔 뻗음 최대 시점 탐색
+    best_lms, best_dist = buf[-1], 0.0
+    for lms in buf:
+        wr = lms[wr_idx]; sh = lms[sh_idx]
+        d  = math.sqrt((wr.x - sh.x)**2 + (wr.y - sh.y)**2)
+        if d > best_dist:
+            best_dist = d
+            best_lms  = lms
+
+    # 메트릭 추출
+    lms    = best_lms
+    sw_val = sw_3d(lms)
+    wr = lms[wr_idx]; sh = lms[sh_idx]; el = lms[el_idx]
+    l_sh = lms[11];   r_sh = lms[12]
+    sh_cx = (l_sh.x + r_sh.x) / 2
+    hi_cx = (lms[23].x + lms[24].x) / 2
+
+    arm_ext  = math.sqrt((wr.x - sh.x)**2 + (wr.y - sh.y)**2) / sw_val
+    el_ang   = angle3pt(sh.x, sh.y, el.x, el.y, wr.x, wr.y)
+    lean     = (sh_cx - hi_cx) / sw_val
+
+    ref_ext  = dna['arm_extension_avg']
+    ref_ang  = dna['elbow_angle_avg']
+    ref_lean = dna['lean_forward_avg']
+
+    # ── 피드백 ────────────────────────────────────────────────────
+    if arm_ext < ref_ext - PUNCH_TOL['arm_extension']:
+        give_feedback(f'pf_{punch_type}_ext',
+                      f'{label} — 팔을 더 뻗어! ({arm_ext:.2f} / LIM {ref_ext:.2f})',
+                      (0, 140, 255))
+        add_pop(f'pp_{punch_type}_ext', f'{label} 팔 뻗음 부족  −8',
+                wr.x, wr.y - 0.07, (0, 140, 255), 3.0)
+    else:
+        add_pop(f'pp_{punch_type}_ext_ok', f'{label} 뻗음 ✓  +8',
+                wr.x, wr.y - 0.07, (0, 220, 80), 3.0)
+
+    if el_ang < ref_ang - PUNCH_TOL['elbow_angle']:
+        give_feedback(f'pf_{punch_type}_ang',
+                      f'{label} — 팔꿈치 더 펴! ({int(el_ang)}° / LIM {int(ref_ang)}°)',
+                      (0, 160, 255))
+        add_pop(f'pp_{punch_type}_ang', f'{label} 팔꿈치 각도  −6',
+                wr.x, wr.y - 0.12, (0, 160, 255), 3.0)
+
+    if abs(lean - ref_lean) > PUNCH_TOL['lean_forward']:
+        msg = f'{label} — 상체 더 숙여' if lean > ref_lean else f'{label} — 상체 너무 앞'
+        give_feedback(f'pf_{punch_type}_lean', msg, (200, 160, 0))
+
+
+# ══════════════════════════════════════════════════════════════════
 # 메인 루프
 # ══════════════════════════════════════════════════════════════════
 cap = cv2.VideoCapture(0)
@@ -737,6 +842,13 @@ with vision.PoseLandmarker.create_from_options(options) as landmarker:
         sw_val = 0.0
 
         if pose_detected and lms_raw:
+            _lm_buffer.append(lms_raw)
+            # pending punch 카운트다운 → 완료 시 form 분석
+            for entry in list(_pending_punch):
+                entry[0] -= 1
+                if entry[0] <= 0:
+                    _pending_punch.remove(entry)
+                    analyse_punch_form(entry[1])
             draw_skeleton(frame, lms_raw, w, h)
             sw_val = sw_3d(lms_raw)
             score  = analyse_pose(lms_raw, w, h, frame, now)

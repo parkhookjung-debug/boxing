@@ -39,10 +39,10 @@ import statistics
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# LIM3.mp4 = 정면 촬영 → 측면 기준 DNA에서 제외
 CSV_FILES = [
     os.path.join(BASE_DIR, "LIM_full_data1.csv"),
     os.path.join(BASE_DIR, "LIM_full_data2.csv"),
-    os.path.join(BASE_DIR, "LIM_full_data3.csv"),
 ]
 OUTPUT_DNA = os.path.join(BASE_DIR, "LIM_DNA.csv")
 

@@ -22,7 +22,8 @@ except ImportError:
     HAS_PLT = False
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-DATA_FILES = ['LIM_full_data1.csv', 'LIM_full_data2.csv', 'LIM_full_data3.csv']
+# LIM3.mp4 = 정면 촬영 → 측면 기준 펀치 DNA에서 제외
+DATA_FILES = ['LIM_full_data1.csv', 'LIM_full_data2.csv']
 OUT_PATH   = os.path.join(BASE_DIR, 'LIM_punch_DNA.csv')
 
 # ── 파라미터 ──────────────────────────────────────────────────────
@@ -156,8 +157,23 @@ def classify_punch(rows, peak_idx, moving_wrist):
 # ══════════════════════════════════════════════════════════════════
 # 메트릭 추출 (피크 시점 기준)
 # ══════════════════════════════════════════════════════════════════
+def find_extension_peak(rows, vel_peak_idx, wrist_name):
+    """속도 피크 이후 팔이 가장 많이 뻗어진 프레임을 반환"""
+    shoulder_name = wrist_name.replace('wrist', 'shoulder')
+    end = min(len(rows)-1, vel_peak_idx + WINDOW_AFTER * 2)
+    best_idx  = vel_peak_idx
+    best_dist = dist2d(rows[vel_peak_idx], shoulder_name, wrist_name)
+    for i in range(vel_peak_idx + 1, end + 1):
+        d = dist2d(rows[i], shoulder_name, wrist_name)
+        if d > best_dist:
+            best_dist = d
+            best_idx  = i
+    return best_idx
+
 def extract_metrics(rows, peak_idx, wrist_name, punch_type):
-    row   = rows[peak_idx]
+    # 속도 피크가 아닌 팔이 최대로 뻗어진 시점에서 측정
+    ext_idx = find_extension_peak(rows, peak_idx, wrist_name)
+    row   = rows[ext_idx]
     sw_v  = sw(row)
     sh_cy = (g(row,'left_shoulder','y') + g(row,'right_shoulder','y')) / 2
     sh_cx = (g(row,'left_shoulder','x') + g(row,'right_shoulder','x')) / 2
@@ -185,10 +201,10 @@ def extract_metrics(rows, peak_idx, wrist_name, punch_type):
         g(row, wrist_name,    'x'), g(row, wrist_name,    'y'),
     )
 
-    # 어퍼컷 전 dip: peak 전 WINDOW_BEFORE 동안 hip 최대 y 변화
+    # 어퍼컷 전 dip: 속도 피크 전 WINDOW_BEFORE 동안 hip 최대 y 변화
     dip = 0.0
     if punch_type == 'uppercut':
-        hip_ys = [g(rows[max(0,peak_idx-i)], 'left_hip', 'y') for i in range(WINDOW_BEFORE)]
+        hip_ys = [g(rows[max(0, peak_idx-i)], 'left_hip', 'y') for i in range(WINDOW_BEFORE)]
         dip = (max(hip_ys) - min(hip_ys)) / sw_v
 
     return {
