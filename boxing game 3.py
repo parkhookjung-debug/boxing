@@ -5,15 +5,20 @@ RTMPose (RTMO-s) 기반. 정면 카메라.
 
 규칙
   AI가 공격 방향을 알려주면 막거나 피하고 카운터를 날려라!
-  ● 팔로 막기 (팔을 코 위로 높이 올리기) → 막은 팔로 카운터 = AI -1
-  ● 머리로 피하기 (고개를 왼쪽/오른쪽으로) → 반대 팔로 카운터 = AI -1
-  ● 카운터는 선택 — 막기만 해도 OK
+  ● 팔로 막기 (팔을 코 위로 높이 올리기)  → 막은 팔로 카운터
+  ● 머리로 피하기 (고개를 왼쪽/오른쪽으로) → 반대 팔로 카운터
+  ● 콤보는 전부 막은 뒤 마지막에만 카운터 기회 제공
+  ● 카운터 성공 = PERFECT / 카운터 없이 방어만 = 성공
 
 난이도 (키보드 1~4)
-  1  EASY    : AI 체력 3  / 목숨 무한
-  2  NORMAL  : AI 체력 5  / 목숨 5
-  3  HARD    : AI 체력 7  / 목숨 3
-  4  EXTREME : AI 체력 10 / 목숨 1
+  1  EASY    : AI 체력 3  / HP 무한 (연습용)
+  2  NORMAL  : AI 체력 5  / HP 100 (5회 실패 허용)
+  3  HARD    : AI 체력 7  / HP 100 (3회 실패 허용) + 패턴 AI
+  4  EXTREME : AI 체력 10 / HP 100 (1회 실패 허용) + 극한 패턴
+
+스피드 모드
+  10라운드 클리어 후 자동 진입 — 2배속부터 시작, 막을수록 빨라짐
+  방어 실패하면 스피드 라운드 기록과 함께 종료
 
 단축키
   1~4  난이도 선택
@@ -31,7 +36,7 @@ except ImportError:
     raise SystemExit("pip install rtmlib onnxruntime")
 
 # ══════════════════════════════════════════════════════════════════
-# 모델 (LIM coach 2 와 공유)
+# 모델
 # ══════════════════════════════════════════════════════════════════
 RTMO_URL = (
     'https://download.openmmlab.com/mmpose/v1/projects/rtmo/onnx_sdk/'
@@ -60,42 +65,60 @@ COCO_CONN = [
 VIS_MIN = 0.30
 NEEDED  = [KP_L_SH,KP_R_SH,KP_L_WR,KP_R_WR,KP_L_EL,KP_R_EL,KP_NOSE]
 
-
 # ══════════════════════════════════════════════════════════════════
-# 난이도
+# 난이도 — HP 시스템
 # ══════════════════════════════════════════════════════════════════
 DIFF = {
-    'EASY':    {'ai_hp':3,  'p_lives':99, 'col':(0,255,120),  'label':'EASY'},
-    'NORMAL':  {'ai_hp':5,  'p_lives':5,  'col':(0,200,255),  'label':'NORMAL'},
-    'HARD':    {'ai_hp':7,  'p_lives':3,  'col':(0,130,255),  'label':'HARD'},
-    'EXTREME': {'ai_hp':10, 'p_lives':1,  'col':(0,50,255),   'label':'EXTREME'},
+    'EASY':    {'ai_hp':3,  'p_hp':100, 'p_dmg':0,   'col':(0,255,120),  'label':'EASY'},
+    'NORMAL':  {'ai_hp':5,  'p_hp':100, 'p_dmg':20,  'col':(0,200,255),  'label':'NORMAL'},
+    'HARD':    {'ai_hp':7,  'p_hp':100, 'p_dmg':34,  'col':(0,130,255),  'label':'HARD'},
+    'EXTREME': {'ai_hp':10, 'p_hp':100, 'p_dmg':100, 'col':(0,50,255),   'label':'EXTREME'},
 }
 
 # ══════════════════════════════════════════════════════════════════
-# 게임 상수
+# 패턴 AI — 난이도별 공격 패턴
 # ══════════════════════════════════════════════════════════════════
-TOTAL_ROUNDS  = 10
-# 단일 공격 타이밍 범위 (초)
-WARN_SINGLE   = (1.4, 2.0)
-DEF_SINGLE    = (1.1, 1.5)
-# 콤보 타이밍 범위 (빠름)
-WARN_COMBO    = (0.6, 1.0)
-DEF_COMBO     = (0.7, 1.0)
+AI_PATTERNS = {
+    'EASY':    None,  # 완전 랜덤
+    'NORMAL':  [
+        ['LEFT','RIGHT'], ['RIGHT','LEFT'],
+        ['LEFT'], ['RIGHT'],
+        ['LEFT','RIGHT','LEFT'],
+    ],
+    'HARD':    [
+        ['LEFT','LEFT'], ['RIGHT','RIGHT'],
+        ['LEFT','RIGHT','LEFT'], ['RIGHT','LEFT','RIGHT'],
+        ['LEFT','RIGHT','RIGHT'], ['RIGHT','LEFT','LEFT'],
+    ],
+    'EXTREME': [
+        ['LEFT','LEFT','LEFT'], ['RIGHT','RIGHT','RIGHT'],
+        ['LEFT','RIGHT','LEFT'], ['RIGHT','LEFT','RIGHT'],
+        ['LEFT','LEFT','RIGHT'], ['RIGHT','RIGHT','LEFT'],
+        ['RIGHT','LEFT','LEFT'], ['LEFT','RIGHT','RIGHT'],
+    ],
+}
 
-COUNTER_DUR   = 1.5    # 카운터 입력 시간
-RESULT_DUR    = 0.8    # 결과 표시 시간
+# ══════════════════════════════════════════════════════════════════
+# 타이밍 상수
+# ══════════════════════════════════════════════════════════════════
+TOTAL_ROUNDS    = 10
+WARN_SINGLE     = (1.4, 2.0)   # 단일 공격 예고
+DEF_SINGLE      = (1.1, 1.5)   # 단일 공격 방어 시간
+WARN_COMBO      = (0.6, 1.0)   # 콤보 예고
+DEF_COMBO       = (0.7, 1.0)   # 콤보 방어 시간
+COUNTER_DUR     = 1.5
+RESULT_DUR      = 0.8
+SPEED_ALERT_DUR = 2.5
 
-# 블록: 손목이 코보다 위에 있어야 함 (코 Y - threshold * sw)
-BLOCK_NOSE_THRESH = 0.10   # 코보다 sw*10% 이상 위
-# 슬립: 코가 어깨 중심에서 sw*thresh 이상 벗어남
+# ══════════════════════════════════════════════════════════════════
+# 감지 상수
+# ══════════════════════════════════════════════════════════════════
+BLOCK_NOSE_THRESH = 0.10
 SLIP_THRESH    = 0.28
-# 카운터 펀치 속도 (sw-normalized)
 PUNCH_VEL      = 0.35
 PUNCH_DOM      = 1.5
-COUNTER_DELAY  = 0.40   # 카운터 페이즈 시작 후 감지 대기 (오탐 방지)
+COUNTER_DELAY  = 0.40
 
-# 공격 → 유효 방어 → 카운터 팔 매핑
-# 'LEFT' 공격 = 플레이어 왼쪽으로 AI 주먹이 날아옴
 VALID_DEF = {
     'LEFT':  {'BLOCK_L':'LEFT',  'SLIP_R':'RIGHT'},
     'RIGHT': {'BLOCK_R':'RIGHT', 'SLIP_L':'LEFT'},
@@ -104,11 +127,14 @@ VALID_DEF = {
 # ══════════════════════════════════════════════════════════════════
 # 게임 상태 변수
 # ══════════════════════════════════════════════════════════════════
-_gstate      = 'DIFF_SELECT'  # DIFF_SELECT / COUNTDOWN / PLAYING / WIN / LOSE
-_sub         = 'WARN'          # WARN / DEFEND / COUNTER / RESULT
+_gstate      = 'DIFF_SELECT'
+_sub         = 'WARN'
 _diff        = 'NORMAL'
 _ai_hp       = 5
-_p_lives     = 5
+_ai_hp_max   = 5
+_p_hp        = 100
+_p_hp_max    = 100
+_p_dmg       = 20
 _round_num   = 0
 _combo       = []
 _combo_idx   = 0
@@ -118,11 +144,20 @@ _countered   = False
 _result_ok   = False
 _phase_start = 0.0
 _cntdn       = 3
-_score       = 0               # 총 카운터 횟수
+_score       = 0
 
-_prev_kp_m   = None
-_warn_dur    = 1.8
-_defend_dur  = 1.4
+_prev_kp_m          = None
+_warn_dur           = 1.8
+_defend_dur         = 1.4
+_defend_phase_start = 0.0
+
+# 스피드 모드
+_speed_mode  = False
+_speed_mult  = 1.0
+_speed_round = 0
+
+# 반응속도 통계
+_react_times = []
 
 # ══════════════════════════════════════════════════════════════════
 # 폰트
@@ -145,8 +180,7 @@ def put_kr(img, text, pos, col, font=None):
 # 기하 헬퍼
 # ══════════════════════════════════════════════════════════════════
 def spatial_arms(kp_m):
-    """미러 디스플레이 기준 오른쪽/왼쪽 팔 인덱스.
-    RTMO가 해부학적(좌/우)이든 위치적(이미지 좌/우)이든 x 비교로 해결."""
+    """미러 디스플레이 기준 오른쪽/왼쪽 팔 인덱스 (x 비교로 labeling 무관)"""
     if kp_m[KP_L_WR][0] > kp_m[KP_R_WR][0]:
         return {'r':[KP_L_SH,KP_L_EL,KP_L_WR], 'l':[KP_R_SH,KP_R_EL,KP_R_WR]}
     return {'r':[KP_R_SH,KP_R_EL,KP_R_WR], 'l':[KP_L_SH,KP_L_EL,KP_L_WR]}
@@ -172,7 +206,6 @@ def draw_skeleton(frame, kp_m, sc):
 # 방어 / 카운터 감지
 # ══════════════════════════════════════════════════════════════════
 def detect_block(kp_m, sw):
-    """손목이 코보다 BLOCK_NOSE_THRESH*sw 만큼 위에 있으면 블록 (공간적 좌우)"""
     nose_y = kp_m[KP_NOSE][1]
     thr    = nose_y - BLOCK_NOSE_THRESH * sw
     arms   = spatial_arms(kp_m)
@@ -183,9 +216,8 @@ def detect_block(kp_m, sw):
     return None
 
 def detect_slip(kp_m, sw):
-    """코가 어깨 중심에서 SLIP_THRESH*sw 이상 벗어나면 슬립"""
-    sh_cx  = (kp_m[KP_L_SH][0]+kp_m[KP_R_SH][0])/2
-    dev    = (kp_m[KP_NOSE][0]-sh_cx)/sw
+    sh_cx = (kp_m[KP_L_SH][0]+kp_m[KP_R_SH][0])/2
+    dev   = (kp_m[KP_NOSE][0]-sh_cx)/sw
     if dev >  SLIP_THRESH: return 'RIGHT'
     if dev < -SLIP_THRESH: return 'LEFT'
     return None
@@ -200,12 +232,11 @@ def get_defense(kp_m, sw):
     return None
 
 def detect_punch(kp_m, sw):
-    """카운터 펀치 방향 감지 (RIGHT/LEFT/None) - 공간적 좌우"""
     global _prev_kp_m
     if _prev_kp_m is None:
         _prev_kp_m = kp_m.copy(); return None
-    arms  = spatial_arms(kp_m)
-    r_wr  = arms['r'][2]; l_wr = arms['l'][2]
+    arms = spatial_arms(kp_m)
+    r_wr = arms['r'][2]; l_wr = arms['l'][2]
     dr = math.sqrt((kp_m[r_wr][0]-_prev_kp_m[r_wr][0])**2+
                    (kp_m[r_wr][1]-_prev_kp_m[r_wr][1])**2)/sw
     dl = math.sqrt((kp_m[l_wr][0]-_prev_kp_m[l_wr][0])**2+
@@ -219,7 +250,10 @@ def detect_punch(kp_m, sw):
 # 게임 로직
 # ══════════════════════════════════════════════════════════════════
 def gen_combo():
-    return [random.choice(['LEFT','RIGHT']) for _ in range(random.randint(1,3))]
+    patterns = AI_PATTERNS.get(_diff)
+    if patterns is None or random.random() < 0.3:
+        return [random.choice(['LEFT','RIGHT']) for _ in range(random.randint(1,3))]
+    return list(random.choice(patterns))
 
 def start_attack():
     global _sub,_phase_start,_defended,_counter_arm,_countered,_result_ok,_prev_kp_m
@@ -228,31 +262,41 @@ def start_attack():
     _prev_kp_m=None
 
 def start_round_combo():
-    """라운드마다 콤보 생성 + 콤보 크기에 따라 타이밍 결정 후 시작"""
     global _combo,_combo_idx,_warn_dur,_defend_dur
     _combo=gen_combo(); _combo_idx=0
+    mult = _speed_mult
     if len(_combo)==1:
-        _warn_dur  = random.uniform(*WARN_SINGLE)
-        _defend_dur = random.uniform(*DEF_SINGLE)
+        _warn_dur   = random.uniform(*WARN_SINGLE) / mult
+        _defend_dur = random.uniform(*DEF_SINGLE)  / mult
     else:
-        _warn_dur  = random.uniform(*WARN_COMBO)
-        _defend_dur = random.uniform(*DEF_COMBO)
+        _warn_dur   = random.uniform(*WARN_COMBO) / mult
+        _defend_dur = random.uniform(*DEF_COMBO)  / mult
     start_attack()
 
 def start_game(diff_key):
-    global _gstate,_diff,_ai_hp,_p_lives,_round_num,_cntdn,_score
-    _diff=diff_key
-    _ai_hp   = DIFF[diff_key]['ai_hp']
-    _p_lives = DIFF[diff_key]['p_lives']
+    global _gstate,_diff,_ai_hp,_ai_hp_max,_p_hp,_p_hp_max,_p_dmg
+    global _round_num,_cntdn,_score,_speed_mode,_speed_mult,_speed_round,_react_times
+    _diff    = diff_key
+    cfg      = DIFF[diff_key]
+    _ai_hp   = _ai_hp_max = cfg['ai_hp']
+    _p_hp    = _p_hp_max  = cfg['p_hp']
+    _p_dmg   = cfg['p_dmg']
     _round_num=0; _score=0
+    _speed_mode=False; _speed_mult=1.0; _speed_round=0
+    _react_times=[]
     _gstate='COUNTDOWN'; _cntdn=3
     global _phase_start; _phase_start=time.time()
 
 def advance():
-    global _round_num,_gstate
+    global _round_num,_gstate,_speed_mode,_speed_mult,_speed_round,_phase_start
     _round_num+=1
-    if _round_num>=TOTAL_ROUNDS:
-        _gstate='WIN'; return
+    if _round_num>=TOTAL_ROUNDS and not _speed_mode:
+        _speed_mode=True; _speed_mult=2.0; _speed_round=0
+        _gstate='SPEED_ALERT'; _phase_start=time.time()
+        return
+    if _speed_mode:
+        _speed_round+=1
+        _speed_mult=2.0+_speed_round*0.15
     start_round_combo()
 
 # ══════════════════════════════════════════════════════════════════
@@ -268,19 +312,35 @@ def timer_bar(frame, w, h, elapsed, total, col):
     cv2.rectangle(frame,(0,h-10),(int(w*ratio),h),col,-1)
 
 def draw_hud(frame, w, h):
-    cfg=DIFF[_diff]
-    # 라운드 / 콤보
-    cv2.putText(frame,f"Round {_round_num+1}/{TOTAL_ROUNDS}  Combo {_combo_idx+1}/{len(_combo)}",
-                (10,32),cv2.FONT_HERSHEY_SIMPLEX,0.75,(180,180,180),2)
+    cfg = DIFF[_diff]
+    # 라운드 표시 (스피드 모드는 별도)
+    if _speed_mode:
+        spd_lbl = f'SPEED x{_speed_mult:.1f}  #{_speed_round+1}'
+        cv2.putText(frame,f"{spd_lbl}  Combo {_combo_idx+1}/{len(_combo)}",
+                    (10,32),cv2.FONT_HERSHEY_SIMPLEX,0.75,(0,180,255),2)
+        # 스피드 모드 테두리 깜빡임
+        if int(time.time()*3)%2:
+            cv2.rectangle(frame,(3,3),(w-3,h-3),(0,80,255),3)
+    else:
+        cv2.putText(frame,f"Round {_round_num+1}/{TOTAL_ROUNDS}  Combo {_combo_idx+1}/{len(_combo)}",
+                    (10,32),cv2.FONT_HERSHEY_SIMPLEX,0.75,(180,180,180),2)
     # AI 체력
     ai_txt='AI: '+'★'*_ai_hp+'☆'*(cfg['ai_hp']-_ai_hp)
     put_kr(frame,ai_txt,(w//2-130,6),(0,220,255),F_MD)
-    # 플레이어 목숨
-    if _p_lives==99: lives='♥ ∞'
-    else:            lives='♥ '+'|'*_p_lives
-    put_kr(frame,lives,(w-200,6),(0,200,100),F_MD)
-    # 점수
+    # 플레이어 HP 바
+    bw,bh=200,18; bx,by=w-bw-10,10
+    ratio=max(0.0,_p_hp/_p_hp_max)
+    bar_col=(0,200,100) if ratio>0.5 else (0,180,255) if ratio>0.25 else (0,60,255)
+    cv2.rectangle(frame,(bx,by),(bx+bw,by+bh),(40,40,40),-1)
+    cv2.rectangle(frame,(bx,by),(bx+int(bw*ratio),by+bh),bar_col,-1)
+    cv2.rectangle(frame,(bx,by),(bx+bw,by+bh),(120,120,120),1)
+    hp_lbl = 'HP ∞' if _p_dmg==0 else f'HP {_p_hp}'
+    put_kr(frame,hp_lbl,(bx-65,by),(180,180,180),F_SM)
+    # 점수 + 평균 반응속도
     cv2.putText(frame,f"Score:{_score}",(10,h-20),cv2.FONT_HERSHEY_SIMPLEX,0.6,(160,160,160),1)
+    if _react_times:
+        avg_ms=int(sum(_react_times)/len(_react_times)*1000)
+        cv2.putText(frame,f"Avg react:{avg_ms}ms",(10,h-44),cv2.FONT_HERSHEY_SIMPLEX,0.55,(120,180,120),1)
 
 def draw_attack_arrow(frame, w, h, attack):
     cx,cy=w//2,h//2-30
@@ -319,8 +379,13 @@ def draw_counter_phase(frame, w, h, counter_arm, elapsed):
     put_kr(frame,'(안 쳐도 OK)',(w//2-90,h//2+80),(120,120,120),F_SM)
     timer_bar(frame,w,h,elapsed,COUNTER_DUR,(0,200,80))
 
-def draw_result_flash(frame, w, h, ok):
-    if ok:
+def draw_result_flash(frame, w, h, ok, perfect=False):
+    if ok and perfect:
+        draw_overlay(frame,0.15,(0,20,10))
+        for i in range(3):
+            cv2.rectangle(frame,(3+i*4,3+i*4),(w-3-i*4,h-3-i*4),(0,220,180),2)
+        put_kr(frame,'PERFECT!',(w//2-110,h//2-60),(0,255,200),F_XL)
+    elif ok:
         draw_overlay(frame,0.18,(0,30,0))
         put_kr(frame,'성공! ✓',(w//2-80,h//2-50),(0,255,100),F_XL)
     else:
@@ -331,15 +396,19 @@ def draw_diff_select(frame, w, h):
     draw_overlay(frame,0.75)
     put_kr(frame,'BOXING DEFENSE GAME',(w//2-250,50),(0,220,255),F_LG)
     put_kr(frame,'난이도를 선택하세요  (1 ~ 4 키)',(w//2-200,120),(180,180,180),F_MD)
-    rows=[('1  EASY',    'AI 체력 3 / 목숨 무한',DIFF['EASY']['col']),
-          ('2  NORMAL',  'AI 체력 5 / 목숨 5',   DIFF['NORMAL']['col']),
-          ('3  HARD',    'AI 체력 7 / 목숨 3',   DIFF['HARD']['col']),
-          ('4  EXTREME', 'AI 체력 10 / 목숨 1',  DIFF['EXTREME']['col'])]
+    rows=[
+        ('1  EASY',    'AI 체력 3  / HP 무한 (연습)',    DIFF['EASY']['col']),
+        ('2  NORMAL',  'AI 체력 5  / HP 100 (5회 허용)', DIFF['NORMAL']['col']),
+        ('3  HARD',    'AI 체력 7  / HP 100 (3회 허용)', DIFF['HARD']['col']),
+        ('4  EXTREME', 'AI 체력 10 / HP 100 (1회 허용)', DIFF['EXTREME']['col']),
+    ]
     for i,(lbl,desc,col) in enumerate(rows):
         y=190+i*95
         cv2.rectangle(frame,(w//2-220,y),(w//2+220,y+78),col,2)
         put_kr(frame,lbl,(w//2-200,y+6),col,F_MD)
         put_kr(frame,desc,(w//2-200,y+44),(140,140,140),F_SM)
+    put_kr(frame,'10라운드 클리어 → 스피드 서바이벌 모드 자동 진입',
+           (w//2-300,h-50),(80,180,80),F_SM)
 
 def draw_countdown(frame, w, h):
     draw_overlay(frame,0.65)
@@ -349,22 +418,46 @@ def draw_countdown(frame, w, h):
     col=(0,220,255) if _cntdn>0 else (0,255,100)
     put_kr(frame,n,(w//2-50,h//2-40),col,F_XL)
 
+def draw_speed_alert(frame, w, h):
+    draw_overlay(frame,0.80,(20,0,30))
+    put_kr(frame,'SPEED MODE!',(w//2-200,h//2-140),(0,180,255),F_XL)
+    put_kr(frame,'2배속으로 버텨라!',(w//2-170,h//2+0),(200,200,200),F_LG)
+    put_kr(frame,'방어 실패 = 게임 오버',(w//2-160,h//2+70),(120,120,120),F_MD)
+    for i in range(3):
+        cv2.rectangle(frame,(3+i*4,3+i*4),(w-3-i*4,h-3-i*4),(0,80,255),2)
+
+def _stats_lines(frame, w, cy):
+    """WIN/LOSE 화면 공통 통계 출력"""
+    if _react_times:
+        avg_ms=int(sum(_react_times)/len(_react_times)*1000)
+        best_ms=int(min(_react_times)*1000)
+        put_kr(frame,f'평균 반응속도: {avg_ms}ms  (최고: {best_ms}ms)',
+               (w//2-210,cy),(160,200,160),F_SM)
+
 def draw_win(frame, w, h):
     draw_overlay(frame,0.80,(0,15,0))
-    put_kr(frame,'🏆 승리!',(w//2-120,h//2-130),(0,255,120),F_XL)
-    put_kr(frame,f'카운터 {_score}번',(w//2-100,h//2+10),(0,200,100),F_LG)
-    put_kr(frame,f'AI 남은 체력: {_ai_hp}',(w//2-130,h//2+80),(0,180,100),F_MD)
-    put_kr(frame,'R = 재시작  /  Q = 종료',(w//2-180,h//2+160),(140,140,140),F_MD)
+    put_kr(frame,'승리!',(w//2-100,h//2-180),(0,255,120),F_XL)
+    put_kr(frame,f'카운터 {_score}번',(w//2-100,h//2-80),(0,200,100),F_LG)
+    if _speed_mode and _speed_round>0:
+        put_kr(frame,f'스피드 {_speed_round}라운드 생존',
+               (w//2-170,h//2+0),(0,200,255),F_MD)
+    _stats_lines(frame,w,h//2+55)
+    put_kr(frame,'R = 재시작  /  Q = 종료',(w//2-180,h//2+140),(140,140,140),F_MD)
 
 def draw_lose(frame, w, h):
     draw_overlay(frame,0.80,(20,0,0))
-    put_kr(frame,'패배',(w//2-70,h//2-130),(0,60,255),F_XL)
-    put_kr(frame,f'카운터 {_score}번',(w//2-100,h//2+10),(100,100,255),F_LG)
-    put_kr(frame,'R = 재시작  /  Q = 종료',(w//2-180,h//2+120),(140,140,140),F_MD)
+    if _speed_mode:
+        title=f'스피드 {_speed_round}라운드 생존'
+        tcol=(0,150,255)
+    else:
+        title='패배'; tcol=(0,60,255)
+    put_kr(frame,title,(w//2-180,h//2-180),tcol,F_XL)
+    put_kr(frame,f'카운터 {_score}번',(w//2-100,h//2-80),(100,100,255),F_LG)
+    _stats_lines(frame,w,h//2+0)
+    put_kr(frame,'R = 재시작  /  Q = 종료',(w//2-180,h//2+100),(140,140,140),F_MD)
 
 def highlight_arm(frame, kp_m, sc, arm, col):
-    """방어/카운터한 팔 강조 (공간적 좌우)"""
-    idxs = spatial_arms(kp_m)['r' if arm=='RIGHT' else 'l']
+    idxs=spatial_arms(kp_m)['r' if arm=='RIGHT' else 'l']
     for i in range(len(idxs)-1):
         a,b=idxs[i],idxs[i+1]
         if sc[a]>VIS_MIN and sc[b]>VIS_MIN:
@@ -374,15 +467,14 @@ def highlight_arm(frame, kp_m, sc, arm, col):
         cv2.circle(frame,(int(kp_m[idxs[2]][0]),int(kp_m[idxs[2]][1])),12,col,-1)
 
 def draw_center_line(frame, kp_m, sw, h):
-    """어깨 중심 수직 점선 + 코 위치 표시 (슬립 기준선)"""
-    sh_cx = int((kp_m[KP_L_SH][0]+kp_m[KP_R_SH][0])/2)
-    for y in range(0, h, 24):
+    sh_cx=int((kp_m[KP_L_SH][0]+kp_m[KP_R_SH][0])/2)
+    for y in range(0,h,24):
         cv2.line(frame,(sh_cx,y),(sh_cx,min(y+12,h)),(90,90,90),1)
-    nx, ny = int(kp_m[KP_NOSE][0]), int(kp_m[KP_NOSE][1])
-    dev = (nx - sh_cx) / sw
-    col = (0,200,255) if abs(dev)>=SLIP_THRESH else (80,220,80)
+    nx,ny=int(kp_m[KP_NOSE][0]),int(kp_m[KP_NOSE][1])
+    dev=(nx-sh_cx)/sw
+    col=(0,200,255) if abs(dev)>=SLIP_THRESH else (80,220,80)
     cv2.circle(frame,(nx,ny),10,col,2)
-    if abs(dev) > 0.10:
+    if abs(dev)>0.10:
         cv2.arrowedLine(frame,(sh_cx,ny),(nx,ny),col,2,tipLength=0.3)
 
 # ══════════════════════════════════════════════════════════════════
@@ -426,12 +518,16 @@ while cap.isOpened():
         if elapsed>=4.0:
             _gstate='PLAYING'; start_round_combo()
 
+    elif _gstate=='SPEED_ALERT':
+        draw_speed_alert(disp,w,h)
+        if now-_phase_start>=SPEED_ALERT_DUR:
+            _gstate='PLAYING'; start_round_combo()
+
     elif _gstate=='PLAYING':
         attack=_combo[_combo_idx]
         elapsed=now-_phase_start
 
         draw_hud(disp,w,h)
-
         if kp_m is not None:
             draw_center_line(disp,kp_m,sw,h)
 
@@ -442,6 +538,7 @@ while cap.isOpened():
             timer_bar(disp,w,h,elapsed,_warn_dur,(0,60,255))
             if elapsed>=_warn_dur:
                 _sub='DEFEND'; _phase_start=now
+                _defend_phase_start=now   # 반응속도 측정 시작
 
         # ── DEFEND: 방어 입력 ────────────────────────────────────
         elif _sub=='DEFEND':
@@ -450,42 +547,39 @@ while cap.isOpened():
             if kp_m is not None and not _defended:
                 defense=get_defense(kp_m,sw)
                 if defense and defense in VALID_DEF.get(attack,{}):
+                    _react_times.append(now-_defend_phase_start)  # 반응속도 기록
                     _defended=True
                     _counter_arm=VALID_DEF[attack][defense]
                     arm_kw='RIGHT' if 'R' in defense else 'LEFT'
                     highlight_arm(disp,kp_m,sc,arm_kw,(0,255,100))
-                    if _combo_idx < len(_combo)-1:
-                        # 콤보 중간: 결과화면 없이 즉시 다음 공격
-                        _combo_idx+=1
-                        start_attack()
+                    if _combo_idx<len(_combo)-1:
+                        _combo_idx+=1; start_attack()
                     else:
-                        # 마지막 공격: 카운터로
                         _sub='COUNTER'; _phase_start=now; _prev_kp_m=None
 
             if elapsed>=_defend_dur and _sub=='DEFEND':
-                if _diff!='EASY': _p_lives-=1
+                _p_hp=max(0,_p_hp-_p_dmg)
                 _result_ok=False
                 _sub='RESULT'; _phase_start=now
-                if _p_lives<=0 and _diff!='EASY': _gstate='LOSE'
+                if _p_hp<=0: _gstate='LOSE'
 
         # ── COUNTER: 카운터 기회 ─────────────────────────────────
         elif _sub=='COUNTER':
             draw_counter_phase(disp,w,h,_counter_arm,elapsed)
 
             if kp_m is not None:
-                if elapsed < COUNTER_DELAY:
-                    _prev_kp_m = kp_m.copy()   # 대기 중 베이스라인 갱신만
+                if elapsed<COUNTER_DELAY:
+                    _prev_kp_m=kp_m.copy()
                 elif not _countered:
                     punch=detect_punch(kp_m,sw)
                     if punch==_counter_arm:
                         _countered=True; _result_ok=True
-                        _score+=1
-                        _ai_hp=max(0,_ai_hp-1)
+                        _score+=1; _ai_hp=max(0,_ai_hp-1)
                         highlight_arm(disp,kp_m,sc,_counter_arm,(0,255,200))
                         _sub='RESULT'; _phase_start=now
                         if _ai_hp<=0: _gstate='WIN'
                 else:
-                    detect_punch(kp_m,sw)   # _prev_kp_m 계속 갱신
+                    detect_punch(kp_m,sw)
 
             if elapsed>=COUNTER_DUR and _sub=='COUNTER':
                 _result_ok=True
@@ -493,7 +587,7 @@ while cap.isOpened():
 
         # ── RESULT: 결과 표시 ────────────────────────────────────
         elif _sub=='RESULT':
-            draw_result_flash(disp,w,h,_result_ok)
+            draw_result_flash(disp,w,h,_result_ok,perfect=(_result_ok and _countered))
             if now-_phase_start>=RESULT_DUR:
                 if _gstate=='PLAYING': advance()
 
@@ -507,7 +601,7 @@ while cap.isOpened():
     cv2.imshow('Boxing Defense Game',disp)
     key=cv2.waitKey(1)&0xFF
     if key in (ord('q'),27): break
-    elif key==ord('r'):      _gstate='DIFF_SELECT'
+    elif key==ord('r'):       _gstate='DIFF_SELECT'
     elif _gstate=='DIFF_SELECT':
         if   key==ord('1'): start_game('EASY')
         elif key==ord('2'): start_game('NORMAL')
