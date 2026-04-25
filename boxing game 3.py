@@ -147,6 +147,8 @@ _cntdn       = 3
 _score       = 0
 
 _prev_kp_m          = None
+_vel_buf_r          = deque(maxlen=3)   # 오른팔 속도 버퍼 (3프레임)
+_vel_buf_l          = deque(maxlen=3)   # 왼팔 속도 버퍼
 _warn_dur           = 1.8
 _defend_dur         = 1.4
 _defend_phase_start = 0.0
@@ -180,8 +182,8 @@ def put_kr(img, text, pos, col, font=None):
 # 기하 헬퍼
 # ══════════════════════════════════════════════════════════════════
 def spatial_arms(kp_m):
-    """미러 디스플레이 기준 오른쪽/왼쪽 팔 인덱스 (x 비교로 labeling 무관)"""
-    if kp_m[KP_L_WR][0] > kp_m[KP_R_WR][0]:
+    """어깨 x좌표 기준 좌우 판단 — 어깨는 펀치/블록 중에도 안정적"""
+    if kp_m[KP_L_SH][0] > kp_m[KP_R_SH][0]:
         return {'r':[KP_L_SH,KP_L_EL,KP_L_WR], 'l':[KP_R_SH,KP_R_EL,KP_R_WR]}
     return {'r':[KP_R_SH,KP_R_EL,KP_R_WR], 'l':[KP_L_SH,KP_L_EL,KP_L_WR]}
 
@@ -232,7 +234,7 @@ def get_defense(kp_m, sw):
     return None
 
 def detect_punch(kp_m, sw):
-    global _prev_kp_m
+    global _prev_kp_m, _vel_buf_r, _vel_buf_l
     if _prev_kp_m is None:
         _prev_kp_m = kp_m.copy(); return None
     arms = spatial_arms(kp_m)
@@ -242,8 +244,10 @@ def detect_punch(kp_m, sw):
     dl = math.sqrt((kp_m[l_wr][0]-_prev_kp_m[l_wr][0])**2+
                    (kp_m[l_wr][1]-_prev_kp_m[l_wr][1])**2)/sw
     _prev_kp_m = kp_m.copy()
-    if dr > PUNCH_VEL and dr > dl*PUNCH_DOM: return 'RIGHT'
-    if dl > PUNCH_VEL and dl > dr*PUNCH_DOM: return 'LEFT'
+    _vel_buf_r.append(dr); _vel_buf_l.append(dl)
+    pr = max(_vel_buf_r); pl = max(_vel_buf_l)   # 3프레임 피크 속도
+    if pr > PUNCH_VEL and pr > pl*PUNCH_DOM: return 'RIGHT'
+    if pl > PUNCH_VEL and pl > pr*PUNCH_DOM: return 'LEFT'
     return None
 
 # ══════════════════════════════════════════════════════════════════
@@ -259,7 +263,7 @@ def start_attack():
     global _sub,_phase_start,_defended,_counter_arm,_countered,_result_ok,_prev_kp_m
     _sub='WARN'; _phase_start=time.time()
     _defended=False; _counter_arm=None; _countered=False; _result_ok=False
-    _prev_kp_m=None
+    _prev_kp_m=None; _vel_buf_r.clear(); _vel_buf_l.clear()
 
 def start_round_combo():
     global _combo,_combo_idx,_warn_dur,_defend_dur
