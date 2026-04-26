@@ -116,9 +116,10 @@ SPEED_ALERT_DUR = 2.5
 BLOCK_NOSE_THRESH  = 0.10
 SLIP_THRESH        = 0.28
 GUARD_DROP_THRESH  = 0.55  # 어깨에서 sw*0.55 이상 낮으면 가드 내려간 것
-PUNCH_VEL      = 0.35
-PUNCH_DOM      = 1.5
-COUNTER_DELAY  = 0.40
+PUNCH_VEL      = 0.18    # 프레임간 속도 (낮게 — extension이 주 필터)
+PUNCH_EXTEND   = 0.38    # 베이스라인 대비 최소 이동거리 (sw 배수)
+PUNCH_DOM      = 1.4     # 한 팔이 다른 팔보다 이만큼 더 빨라야
+COUNTER_DELAY  = 0.45    # 블로킹 자세 충분히 풀릴 시간
 
 VALID_DEF = {
     'LEFT':  {'BLOCK_L':'LEFT',  'SLIP_R':'RIGHT'},
@@ -150,6 +151,8 @@ _score       = 0
 _prev_kp_m          = None
 _vel_buf_r          = deque(maxlen=3)   # 오른팔 속도 버퍼 (3프레임)
 _vel_buf_l          = deque(maxlen=3)   # 왼팔 속도 버퍼
+_punch_base_r       = None              # 카운터 딜레이 끝 기준 오른손목 위치
+_punch_base_l       = None              # 카운터 딜레이 끝 기준 왼손목 위치
 _warn_dur           = 1.8
 _defend_dur         = 1.4
 _defend_phase_start = 0.0
@@ -241,21 +244,33 @@ def get_defense(kp_m, sw):
     if s == 'LEFT':  return 'SLIP_L'
     return None
 
+def set_punch_baseline(kp_m):
+    """카운터 딜레이 중 매 프레임 갱신 — 딜레이 끝 시점의 안정 위치를 기준으로 삼음"""
+    global _punch_base_r, _punch_base_l
+    arms = spatial_arms(kp_m)
+    _punch_base_r = kp_m[arms['r'][2]][:2].copy()
+    _punch_base_l = kp_m[arms['l'][2]][:2].copy()
+
 def detect_punch(kp_m, sw):
+    """속도(프레임간) AND 이동거리(베이스라인 대비) 둘 다 충족해야 펀치 인정"""
     global _prev_kp_m, _vel_buf_r, _vel_buf_l
-    if _prev_kp_m is None:
+    if _prev_kp_m is None or _punch_base_r is None:
         _prev_kp_m = kp_m.copy(); return None
     arms = spatial_arms(kp_m)
     r_wr = arms['r'][2]; l_wr = arms['l'][2]
-    dr = math.sqrt((kp_m[r_wr][0]-_prev_kp_m[r_wr][0])**2+
+    vr = math.sqrt((kp_m[r_wr][0]-_prev_kp_m[r_wr][0])**2+
                    (kp_m[r_wr][1]-_prev_kp_m[r_wr][1])**2)/sw
-    dl = math.sqrt((kp_m[l_wr][0]-_prev_kp_m[l_wr][0])**2+
+    vl = math.sqrt((kp_m[l_wr][0]-_prev_kp_m[l_wr][0])**2+
                    (kp_m[l_wr][1]-_prev_kp_m[l_wr][1])**2)/sw
     _prev_kp_m = kp_m.copy()
-    _vel_buf_r.append(dr); _vel_buf_l.append(dl)
-    pr = max(_vel_buf_r); pl = max(_vel_buf_l)   # 3프레임 피크 속도
-    if pr > PUNCH_VEL and pr > pl*PUNCH_DOM: return 'RIGHT'
-    if pl > PUNCH_VEL and pl > pr*PUNCH_DOM: return 'LEFT'
+    _vel_buf_r.append(vr); _vel_buf_l.append(vl)
+    er = math.sqrt((kp_m[r_wr][0]-_punch_base_r[0])**2+
+                   (kp_m[r_wr][1]-_punch_base_r[1])**2)/sw
+    el = math.sqrt((kp_m[l_wr][0]-_punch_base_l[0])**2+
+                   (kp_m[l_wr][1]-_punch_base_l[1])**2)/sw
+    pr = max(_vel_buf_r); pl = max(_vel_buf_l)
+    if pr > PUNCH_VEL and er > PUNCH_EXTEND and pr > pl*PUNCH_DOM: return 'RIGHT'
+    if pl > PUNCH_VEL and el > PUNCH_EXTEND and pl > pr*PUNCH_DOM: return 'LEFT'
     return None
 
 # ══════════════════════════════════════════════════════════════════
@@ -269,9 +284,11 @@ def gen_combo():
 
 def start_attack():
     global _sub,_phase_start,_defended,_counter_arm,_countered,_result_ok,_prev_kp_m
+    global _punch_base_r, _punch_base_l
     _sub='WARN'; _phase_start=time.time()
     _defended=False; _counter_arm=None; _countered=False; _result_ok=False
     _prev_kp_m=None; _vel_buf_r.clear(); _vel_buf_l.clear()
+    _punch_base_r=None; _punch_base_l=None
 
 def start_round_combo():
     global _combo,_combo_idx,_warn_dur,_defend_dur
@@ -587,6 +604,7 @@ while cap.isOpened():
             if kp_m is not None:
                 if elapsed<COUNTER_DELAY:
                     _prev_kp_m=kp_m.copy()
+                    set_punch_baseline(kp_m)  # 딜레이 끝까지 갱신 → 안정 기준점 확보
                 elif not _countered:
                     punch=detect_punch(kp_m,sw)
                     if punch==_counter_arm:
