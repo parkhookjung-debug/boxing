@@ -22,26 +22,25 @@ try:
 except ImportError:
     raise SystemExit("pip install rtmlib onnxruntime")
 
-# pygame 사운드 (없으면 무음으로 계속)
+# sounddevice 사운드 (없으면 무음으로 계속)
 _audio_ok = False
 try:
-    import pygame
-    pygame.mixer.pre_init(44100, -16, 2, 512)
-    pygame.mixer.init()
+    import sounddevice as _sd
+    _sd.query_devices()   # 장치 없으면 여기서 예외
     _audio_ok = True
-except Exception:
-    pass
+    print("[사운드] sounddevice 초기화 완료")
+except Exception as e:
+    print(f"[사운드] 비활성화: {e}")
+
+_SR = 44100  # 샘플레이트
 
 # ══════════════════════════════════════════════════════════════════
-# 사운드 생성
+# 사운드 생성 — numpy float32 배열로 저장, 재생 시 비동기 play
 # ══════════════════════════════════════════════════════════════════
-def _make_snd(freqs, dur, vol=0.55, decay_k=4.0, wave='sine'):
-    if not _audio_ok:
-        return None
-    sr = 44100
-    n  = int(sr * dur)
-    t  = np.linspace(0, dur, n, False)
-    w  = np.zeros(n)
+def _make_snd(freqs, dur, vol=0.7, decay_k=4.0, wave='sine'):
+    n = int(_SR * dur)
+    t = np.linspace(0, dur, n, False)
+    w = np.zeros(n, dtype=np.float64)
     for f, amp in freqs:
         if wave == 'sine':
             w += np.sin(2*np.pi*f*t) * amp
@@ -49,27 +48,21 @@ def _make_snd(freqs, dur, vol=0.55, decay_k=4.0, wave='sine'):
             w += np.sign(np.sin(2*np.pi*f*t)) * amp
         elif wave == 'noise':
             w += np.random.uniform(-1, 1, n) * amp
-    env  = np.exp(-decay_k * t / dur)
-    env[:int(0.005*sr)] = np.linspace(0, 1, int(0.005*sr))
-    w    = np.clip(w * env * vol, -1, 1)
-    data = (w * 32767).astype(np.int16)
-    stereo = np.column_stack([data, data])
-    return pygame.sndarray.make_sound(stereo)
+    env = np.exp(-decay_k * t / dur)
+    env[:max(1, int(0.005*_SR))] *= np.linspace(0, 1, max(1, int(0.005*_SR)))
+    return np.clip(w * env * vol, -1, 1).astype(np.float32)
 
-def _snd(s):
-    if s is not None:
-        try: s.play()
-        except: pass
+def _snd(arr):
+    if not _audio_ok or arr is None: return
+    try: _sd.play(arr, _SR)
+    except: pass
 
-if _audio_ok:
-    SND_BELL    = _make_snd([(880,0.6),(1760,0.3),(2640,0.1)], 0.9, vol=0.5, decay_k=3.0)
-    SND_DEFEND  = _make_snd([(440,0.7),(660,0.3)],              0.12, vol=0.35, decay_k=8.0)
-    SND_HIT     = _make_snd([(180,1.0)],                        0.15, vol=0.6,  decay_k=6.0, wave='noise')
-    SND_PERFECT = _make_snd([(1046,0.6),(1318,0.3),(1568,0.1)], 0.35, vol=0.55, decay_k=2.5)
-    SND_FAIL    = _make_snd([(140,0.8),(105,0.2)],              0.40, vol=0.5,  decay_k=2.0, wave='square')
-    SND_SPEED   = _make_snd([(660,1.0)],                        0.18, vol=0.6,  decay_k=1.0, wave='square')
-else:
-    SND_BELL = SND_DEFEND = SND_HIT = SND_PERFECT = SND_FAIL = SND_SPEED = None
+SND_BELL    = _make_snd([(880,0.6),(1760,0.3),(2640,0.1)], 0.9, vol=0.6, decay_k=3.0)
+SND_DEFEND  = _make_snd([(440,0.7),(660,0.3)],              0.12, vol=0.45, decay_k=8.0)
+SND_HIT     = _make_snd([(180,1.0)],                        0.18, vol=0.75, decay_k=5.0, wave='noise')
+SND_PERFECT = _make_snd([(1046,0.6),(1318,0.3),(1568,0.1)], 0.40, vol=0.65, decay_k=2.5)
+SND_FAIL    = _make_snd([(140,0.8),(105,0.2)],              0.45, vol=0.65, decay_k=2.0, wave='square')
+SND_SPEED   = _make_snd([(660,0.5),(880,0.5)],              0.25, vol=0.7,  decay_k=1.5, wave='square')
 
 # ══════════════════════════════════════════════════════════════════
 # 모델
@@ -366,7 +359,8 @@ def advance():
     _round_num+=1
     if _round_num>=TOTAL_ROUNDS and not _speed_mode:
         _speed_mode=True; _speed_mult=2.0; _speed_round=0
-        _gstate='SPEED_ALERT'; _phase_start=time.time(); return
+        _gstate='SPEED_ALERT'; _phase_start=time.time()
+        _snd(SND_SPEED); return
     if _speed_mode:
         _speed_round+=1; _speed_mult=2.0+_speed_round*0.15
     start_round_combo()
@@ -570,7 +564,6 @@ while cap.isOpened():
 
     elif _gstate=='SPEED_ALERT':
         draw_speed_alert(disp,w,h)
-        _snd(SND_SPEED)
         if now-_phase_start>=SPEED_ALERT_DUR:
             _gstate='PLAYING'; start_round_combo()
 
@@ -666,4 +659,3 @@ while cap.isOpened():
 
 cap.release()
 cv2.destroyAllWindows()
-if _audio_ok: pygame.mixer.quit()
