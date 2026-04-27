@@ -208,16 +208,30 @@ _lm_buf  = deque(maxlen=30)
 _pending = []
 EXT_DELAY = 8
 
-_punch_state  = {'lead':'IDLE','rear':'IDLE'}
-_punch_cd     = {'lead':0.0,'rear':0.0}
-_punch_motion = {'lead':{'dx':0,'dy':0,'el':[]}, 'rear':{'dx':0,'dy':0,'el':[]}}
-PUNCH_CD  = 0.6
-VEL_START = 0.16
-VEL_END   = 0.06
-DOM_RATIO = 1.4
+# 펀치 감지 — 버퍼 기반 (상태 머신 없음, 속도 falling-edge 검출)
+_BUF_SZ      = 12           # 프레임 버퍼 크기
+_v_buf_lead  = deque(maxlen=_BUF_SZ)   # 속도
+_v_buf_rear  = deque(maxlen=_BUF_SZ)
+_el_buf_lead = deque(maxlen=_BUF_SZ)   # 팔꿈치 높이 (정규화)
+_el_buf_rear = deque(maxlen=_BUF_SZ)
+_ea_buf_lead = deque(maxlen=_BUF_SZ)   # 팔꿈치 각도
+_ea_buf_rear = deque(maxlen=_BUF_SZ)
+_wy_buf_lead = deque(maxlen=_BUF_SZ)   # 손목 y (어퍼컷용)
+_wy_buf_rear = deque(maxlen=_BUF_SZ)
 
-HOOK_ELBOW_THRESH = 0.12  # (elbow_y - sh_y)/sw < this → 팔꿈치가 어깨 위쪽 → 훅
-UPPER_RISE_THRESH = 0.10  # 손목이 시작점 대비 sw의 10% 이상 올라가면 어퍼컷
+_prev_v_lead   = 0.0
+_prev_v_rear   = 0.0
+_punch_cd      = {'lead':0.0,'rear':0.0}
+
+PUNCH_CD  = 0.55   # 펀치 최소 간격 (초)
+VEL_START = 0.15   # 펀치 시작 속도 임계 (sw 대비)
+DOM_RATIO = 1.35   # 한쪽 손이 다른 손보다 이 배 이상 빨라야 펀치
+
+# 펀치 분류 임계값
+HOOK_ELBOW_THRESH  = 0.12   # 팔꿈치 높이 < 이 값 → 어깨 높이 이상 → 훅 후보
+HOOK_ELBOW_ANGLE   = 130.0  # 훅은 팔꿈치가 굽어있어야 함 (각도 < 이 값)
+UPPER_RISE_THRESH  = 0.12   # 손목이 sw의 12% 이상 올라가면 어퍼컷 후보
+UPPER_ELBOW_ANGLE  = 140.0  # 어퍼컷도 팔꿈치가 굽어있어야 함
 
 _prev_jab_wr   = None
 _prev_cross_wr = None
@@ -237,31 +251,37 @@ _snap_count  = 0
 _last_spoken = ''
 
 # ══════════════════════════════════════════════════════════════════
-# 펀치 분류 (속도 방향 + 팔꿈치 높이)
+# 펀치 분류 (버퍼 기반, 세분화 조건)
 # ══════════════════════════════════════════════════════════════════
-def classify_punch_motion(side, sw):
-    m      = _punch_motion[side]
-    dx     = m['dx']
-    # 훅: 평균 대신 최솟값 — 스윙 중 한 순간이라도 팔꿈치가 어깨 높이면 훅
-    min_el = min(m['el']) if m['el'] else 1.0
+def classify_from_buf(side, sw, el_buf, ea_buf, wy_buf):
+    """
+    버퍼 내 데이터로 펀치 종류 판별 (우선순위 순)
 
-    # 어퍼컷: 누적 dy 대신 시작점 대비 최대 상승량 사용 (잡음에 강함)
-    wy0  = m.get('wy0', 0)
-    rise = (wy0 - m.get('wy_min', wy0)) / (sw + 1e-6)   # 위로 이동 = 양수
-    if rise > UPPER_RISE_THRESH and rise > abs(dx) / (sw + 1e-6) * 0.5:
-        return 'uppercut'
+    어퍼컷: 손목 상승량 ≥ UPPER_RISE_THRESH  AND  팔꿈치 굽음 < UPPER_ELBOW_ANGLE
+    훅    : 팔꿈치 높이 ≤ HOOK_ELBOW_THRESH  AND  팔꿈치 굽음 < HOOK_ELBOW_ANGLE
+    잽/투 : 위 조건 불충족 (직선 뻗기)
+    """
+    min_el = min(el_buf) if el_buf else 1.0      # 가장 팔꿈치가 높은 순간
+    min_ea = min(ea_buf) if ea_buf else 180.0    # 가장 팔꿈치가 굽은 순간
 
-    # 훅: 펀치 중 한 번이라도 팔꿈치가 어깨 높이까지 올라온 경우
-    if min_el < HOOK_ELBOW_THRESH:
+    # 어퍼컷: 손목이 버퍼 시작보다 충분히 올라갔고 팔꿈치가 굽어있음
+    wy_list = list(wy_buf)
+    if wy_list:
+        rise = (wy_list[0] - min(wy_list)) / (sw + 1e-6)  # 위로 이동 = 양수
+        if rise > UPPER_RISE_THRESH and min_ea < UPPER_ELBOW_ANGLE:
+            return 'uppercut'
+
+    # 훅: 팔꿈치가 어깨 높이까지 올라왔고 팔꿈치가 굽어있음
+    if min_el < HOOK_ELBOW_THRESH and min_ea < HOOK_ELBOW_ANGLE:
         return 'hook'
 
     return 'jab' if side == 'lead' else 'cross'
 
 # ══════════════════════════════════════════════════════════════════
-# 펀치 감지 (상태 머신)
+# 펀치 감지 — falling-edge 기반 (상태 머신 없음 → 갇힘 버그 없음)
 # ══════════════════════════════════════════════════════════════════
 def update_punch_detect(kp, sc, now, w):
-    global _prev_jab_wr, _prev_cross_wr
+    global _prev_v_lead, _prev_v_rear, _prev_jab_wr, _prev_cross_wr
 
     if sc[JAB_WR] < VIS_MIN or sc[CROSS_WR] < VIS_MIN: return
 
@@ -272,45 +292,51 @@ def update_punch_detect(kp, sc, now, w):
     _trail_rear.append((w-cx_, cy_))
 
     sw = sw_px(kp)
-    d_j = (math.sqrt((jx-_prev_jab_wr[0])**2+(jy-_prev_jab_wr[1])**2)/sw
-           if _prev_jab_wr else 0.0)
-    d_c = (math.sqrt((cx_-_prev_cross_wr[0])**2+(cy_-_prev_cross_wr[1])**2)/sw
-           if _prev_cross_wr else 0.0)
-    _dbg_vel['lead'] = d_j; _dbg_vel['rear'] = d_c
+    v_lead = (math.sqrt((jx-_prev_jab_wr[0])**2+(jy-_prev_jab_wr[1])**2)/sw
+              if _prev_jab_wr else 0.0)
+    v_rear = (math.sqrt((cx_-_prev_cross_wr[0])**2+(cy_-_prev_cross_wr[1])**2)/sw
+              if _prev_cross_wr else 0.0)
+    _dbg_vel['lead'] = v_lead; _dbg_vel['rear'] = v_rear
 
-    dj_x = jx-_prev_jab_wr[0]   if _prev_jab_wr   else 0
-    dj_y = jy-_prev_jab_wr[1]   if _prev_jab_wr   else 0
-    dc_x = cx_-_prev_cross_wr[0] if _prev_cross_wr else 0
-    dc_y = cy_-_prev_cross_wr[1] if _prev_cross_wr else 0
+    # 팔꿈치 높이 (정규화): 어깨보다 위 = 음수, 아래 = 양수
+    jel = (kp[JAB_EL][1]-kp[JAB_SH][1])/sw   if sc[JAB_EL]>VIS_MIN   else 1.0
+    rel = (kp[CROSS_EL][1]-kp[CROSS_SH][1])/sw if sc[CROSS_EL]>VIS_MIN else 1.0
 
-    def check(side, d_self, d_other, wr, sh, el, rdx, rdy):
-        st = _punch_state[side]
-        if d_self > VEL_START and d_self > d_other*DOM_RATIO and st == 'IDLE':
-            if now - _punch_cd[side] > PUNCH_CD:
-                _punch_state[side] = 'PUNCHING'
-                # 어퍼컷 판단용: 펀치 시작 시 손목 y 위치 기록
-                _punch_motion[side] = {'dx':0,'dy':0,'el':[],
-                                       'wy0': kp[wr][1], 'wy_min': kp[wr][1]}
-        if _punch_state[side] == 'PUNCHING':
-            _punch_motion[side]['dx'] += rdx
-            _punch_motion[side]['dy'] += rdy
-            # 손목이 올라간 최고점 추적 (이미지 y: 위로 갈수록 작아짐)
-            cur_wy = kp[wr][1]
-            if cur_wy < _punch_motion[side]['wy_min']:
-                _punch_motion[side]['wy_min'] = cur_wy
-            if sc[el] > VIS_MIN:
-                el_h = (kp[el][1]-kp[sh][1]) / sw
-                _punch_motion[side]['el'].append(el_h)
-        if d_self < VEL_END and _punch_state[side] == 'PUNCHING':
-            _punch_state[side] = 'IDLE'
-            _punch_cd[side]    = now
-            pt = classify_punch_motion(side, sw)
-            _last_pt[side] = pt
-            _pending.append([EXT_DELAY, pt, side])
+    # 팔꿈치 각도 (어깨-팔꿈치-손목): 굽을수록 작아짐
+    jea = (angle3pt(kp[JAB_SH][0],kp[JAB_SH][1], kp[JAB_EL][0],kp[JAB_EL][1],
+                    kp[JAB_WR][0],kp[JAB_WR][1])
+           if sc[JAB_EL]>VIS_MIN else 180.0)
+    rea = (angle3pt(kp[CROSS_SH][0],kp[CROSS_SH][1], kp[CROSS_EL][0],kp[CROSS_EL][1],
+                    kp[CROSS_WR][0],kp[CROSS_WR][1])
+           if sc[CROSS_EL]>VIS_MIN else 180.0)
 
-    check('lead', d_j, d_c, JAB_WR,   JAB_SH,   JAB_EL,   dj_x, dj_y)
-    check('rear',  d_c, d_j, CROSS_WR, CROSS_SH, CROSS_EL, dc_x, dc_y)
+    _v_buf_lead.append(v_lead);  _v_buf_rear.append(v_rear)
+    _el_buf_lead.append(jel);    _el_buf_rear.append(rel)
+    _ea_buf_lead.append(jea);    _ea_buf_rear.append(rea)
+    _wy_buf_lead.append(jy);     _wy_buf_rear.append(cy_)
 
+    peak_lead = max(_v_buf_lead) if _v_buf_lead else 0.0
+    peak_rear = max(_v_buf_rear) if _v_buf_rear else 0.0
+
+    # falling-edge: 직전 프레임이 빨랐고 이번 프레임에 떨어지면 펀치 완료
+    if (_prev_v_lead > VEL_START and v_lead <= VEL_START and
+            peak_lead > peak_rear * DOM_RATIO and
+            now - _punch_cd['lead'] > PUNCH_CD):
+        pt = classify_from_buf('lead', sw, _el_buf_lead, _ea_buf_lead, _wy_buf_lead)
+        _last_pt['lead'] = pt
+        _punch_cd['lead'] = now
+        _pending.append([EXT_DELAY, pt, 'lead'])
+
+    if (_prev_v_rear > VEL_START and v_rear <= VEL_START and
+            peak_rear > peak_lead * DOM_RATIO and
+            now - _punch_cd['rear'] > PUNCH_CD):
+        pt = classify_from_buf('rear', sw, _el_buf_rear, _ea_buf_rear, _wy_buf_rear)
+        _last_pt['rear'] = pt
+        _punch_cd['rear'] = now
+        _pending.append([EXT_DELAY, pt, 'rear'])
+
+    _prev_v_lead   = v_lead
+    _prev_v_rear   = v_rear
     _prev_jab_wr   = (jx, jy)
     _prev_cross_wr = (cx_, cy_)
 
@@ -572,15 +598,18 @@ def draw_ghost(frame, kp_m, sw):
     cv2.addWeighted(ov,0.4,frame,0.6,0,frame)
 
 def draw_vel_debug(frame, w):
+    cd_l = max(0.0, PUNCH_CD - (time.time()-_punch_cd['lead']))
+    cd_r = max(0.0, PUNCH_CD - (time.time()-_punch_cd['rear']))
     lines = [
-        (f"JAB   {_dbg_vel['lead']:.3f} [{_punch_state['lead']}]  → {_last_pt['lead']}",
-         PUNCH_COLS[_last_pt['lead']] if _punch_state['lead']=='PUNCHING' else (120,120,120)),
-        (f"CROSS {_dbg_vel['rear']:.3f} [{_punch_state['rear']}]  → {_last_pt['rear']}",
-         PUNCH_COLS[_last_pt['rear']] if _punch_state['rear']=='PUNCHING' else (120,120,120)),
-        (f"vel_start={VEL_START}  TTS={'ON' if _voice_on else 'OFF'}", (80,80,80)),
+        (f"JAB   v={_dbg_vel['lead']:.3f}  cd={cd_l:.2f}  → {_last_pt['lead']}",
+         PUNCH_COLS[_last_pt['lead']] if cd_l < 0.1 else (120,120,120)),
+        (f"CROSS v={_dbg_vel['rear']:.3f}  cd={cd_r:.2f}  → {_last_pt['rear']}",
+         PUNCH_COLS[_last_pt['rear']] if cd_r < 0.1 else (120,120,120)),
+        (f"vel_start={VEL_START}  dom={DOM_RATIO}  TTS={'ON' if _voice_on else 'OFF'}",
+         (80,80,80)),
     ]
     for i,(t,col) in enumerate(lines):
-        cv2.putText(frame,t,(w-430,110+i*22),cv2.FONT_HERSHEY_SIMPLEX,0.54,col,1)
+        cv2.putText(frame,t,(w-460,110+i*22),cv2.FONT_HERSHEY_SIMPLEX,0.50,col,1)
 
 def draw_ready(frame, pose_ok, stable, w, h):
     ov=frame.copy(); cv2.rectangle(ov,(0,0),(w,h),(8,8,25),-1)
