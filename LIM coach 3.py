@@ -217,7 +217,7 @@ VEL_END   = 0.06
 DOM_RATIO = 1.4
 
 HOOK_ELBOW_THRESH = 0.12  # (elbow_y - sh_y)/sw < this → 팔꿈치가 어깨 위쪽 → 훅
-UPPER_DY_THRESH   = 0.03  # 위쪽 이동 임계
+UPPER_RISE_THRESH = 0.10  # 손목이 시작점 대비 sw의 10% 이상 올라가면 어퍼컷
 
 _prev_jab_wr   = None
 _prev_cross_wr = None
@@ -240,19 +240,21 @@ _last_spoken = ''
 # 펀치 분류 (속도 방향 + 팔꿈치 높이)
 # ══════════════════════════════════════════════════════════════════
 def classify_punch_motion(side, sw):
-    m   = _punch_motion[side]
-    dx  = m['dx']
-    dy  = m['dy']               # 이미지 좌표 (아래 = 양수)
-    avg_el = sum(m['el'])/max(len(m['el']),1) if m['el'] else 0.0
-    dy_up  = -dy                # 위쪽 이동 = 양수
-    dx_abs = abs(dx)
+    m      = _punch_motion[side]
+    dx     = m['dx']
+    # 훅: 평균 대신 최솟값 — 스윙 중 한 순간이라도 팔꿈치가 어깨 높이면 훅
+    min_el = min(m['el']) if m['el'] else 1.0
 
-    # 어퍼컷: 위 이동 dominant
-    if dy_up > dx_abs * 1.0 and dy_up / (sw+1e-6) > UPPER_DY_THRESH:
+    # 어퍼컷: 누적 dy 대신 시작점 대비 최대 상승량 사용 (잡음에 강함)
+    wy0  = m.get('wy0', 0)
+    rise = (wy0 - m.get('wy_min', wy0)) / (sw + 1e-6)   # 위로 이동 = 양수
+    if rise > UPPER_RISE_THRESH and rise > abs(dx) / (sw + 1e-6) * 0.5:
         return 'uppercut'
-    # 훅: 팔꿈치가 어깨와 같은 높이 이상 (image coord: 작은 y = 위)
-    if avg_el < HOOK_ELBOW_THRESH:
+
+    # 훅: 펀치 중 한 번이라도 팔꿈치가 어깨 높이까지 올라온 경우
+    if min_el < HOOK_ELBOW_THRESH:
         return 'hook'
+
     return 'jab' if side == 'lead' else 'cross'
 
 # ══════════════════════════════════════════════════════════════════
@@ -286,10 +288,16 @@ def update_punch_detect(kp, sc, now, w):
         if d_self > VEL_START and d_self > d_other*DOM_RATIO and st == 'IDLE':
             if now - _punch_cd[side] > PUNCH_CD:
                 _punch_state[side] = 'PUNCHING'
-                _punch_motion[side] = {'dx':0,'dy':0,'el':[]}
+                # 어퍼컷 판단용: 펀치 시작 시 손목 y 위치 기록
+                _punch_motion[side] = {'dx':0,'dy':0,'el':[],
+                                       'wy0': kp[wr][1], 'wy_min': kp[wr][1]}
         if _punch_state[side] == 'PUNCHING':
             _punch_motion[side]['dx'] += rdx
             _punch_motion[side]['dy'] += rdy
+            # 손목이 올라간 최고점 추적 (이미지 y: 위로 갈수록 작아짐)
+            cur_wy = kp[wr][1]
+            if cur_wy < _punch_motion[side]['wy_min']:
+                _punch_motion[side]['wy_min'] = cur_wy
             if sc[el] > VIS_MIN:
                 el_h = (kp[el][1]-kp[sh][1]) / sw
                 _punch_motion[side]['el'].append(el_h)
