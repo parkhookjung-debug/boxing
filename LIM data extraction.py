@@ -21,6 +21,8 @@ VIDEOS = [
     ("LIM1.mp4", "LIM_full_data1.csv"),
     ("LIM2.mp4", "LIM_full_data2.csv"),
     ("LIM3.mp4", "LIM_full_data3.csv"),
+    ("LIM4.mp4", "LIM_full_data4.csv"),
+    ("LIM5.mp4", "LIM_full_data5.csv"),
 ]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
