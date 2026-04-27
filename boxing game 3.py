@@ -252,16 +252,19 @@ def set_punch_baseline(kp_m):
     _punch_base_l = kp_m[arms['l'][2]][:2].copy()
 
 def detect_punch(kp_m, sw):
-    """속도(프레임간) AND 이동거리(베이스라인 대비) 둘 다 충족해야 펀치 인정"""
+    """수평 이동이 수직 이상일 때만 속도로 인정 → 팔 내리기/안정화 오인식 차단"""
     global _prev_kp_m, _vel_buf_r, _vel_buf_l
     if _prev_kp_m is None or _punch_base_r is None:
         _prev_kp_m = kp_m.copy(); return None
     arms = spatial_arms(kp_m)
     r_wr = arms['r'][2]; l_wr = arms['l'][2]
-    vr = math.sqrt((kp_m[r_wr][0]-_prev_kp_m[r_wr][0])**2+
-                   (kp_m[r_wr][1]-_prev_kp_m[r_wr][1])**2)/sw
-    vl = math.sqrt((kp_m[l_wr][0]-_prev_kp_m[l_wr][0])**2+
-                   (kp_m[l_wr][1]-_prev_kp_m[l_wr][1])**2)/sw
+    dr_x = kp_m[r_wr][0] - _prev_kp_m[r_wr][0]
+    dr_y = kp_m[r_wr][1] - _prev_kp_m[r_wr][1]
+    dl_x = kp_m[l_wr][0] - _prev_kp_m[l_wr][0]
+    dl_y = kp_m[l_wr][1] - _prev_kp_m[l_wr][1]
+    # 수직 이동(팔 내리기)은 속도 0으로 처리 — 수평 이동만 펀치로 계산
+    vr = math.sqrt(dr_x**2+dr_y**2)/sw if abs(dr_x) >= abs(dr_y) else 0.0
+    vl = math.sqrt(dl_x**2+dl_y**2)/sw if abs(dl_x) >= abs(dl_y) else 0.0
     _prev_kp_m = kp_m.copy()
     _vel_buf_r.append(vr); _vel_buf_l.append(vl)
     er = math.sqrt((kp_m[r_wr][0]-_punch_base_r[0])**2+
