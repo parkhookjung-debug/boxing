@@ -228,10 +228,12 @@ VEL_START = 0.15   # 펀치 시작 속도 임계 (sw 대비)
 DOM_RATIO = 1.35   # 한쪽 손이 다른 손보다 이 배 이상 빨라야 펀치
 
 # 펀치 분류 임계값
-HOOK_ELBOW_THRESH  = 0.12   # 팔꿈치 높이 < 이 값 → 어깨 높이 이상 → 훅 후보
-HOOK_ELBOW_ANGLE   = 130.0  # 훅은 팔꿈치가 굽어있어야 함 (각도 < 이 값)
-UPPER_RISE_THRESH  = 0.12   # 손목이 sw의 12% 이상 올라가면 어퍼컷 후보
-UPPER_ELBOW_ANGLE  = 140.0  # 어퍼컷도 팔꿈치가 굽어있어야 함
+HOOK_ELBOW_THRESH  = 0.05   # 팔꿈치가 어깨 높이에 실제로 도달해야 훅 후보 (가드 자세 제외)
+HOOK_ELBOW_ANGLE   = 110.0  # 훅은 팔꿈치가 많이 굽어있어야 함
+HOOK_MIN_FRAMES    = 3      # 위 두 조건을 동시에 만족하는 프레임 수 요구 (순간 오감지 방지)
+UPPER_RISE_THRESH  = 0.20   # 손목이 sw의 20% 이상 올라가야 어퍼컷 후보 (잽과 구분)
+UPPER_ELBOW_ANGLE  = 120.0  # 어퍼컷은 팔꿈치가 충분히 굽어있어야 함
+UPPER_ELBOW_LOW    = 0.15   # 어퍼컷: 팔꿈치가 어깨보다 아래에 있어야 함 (훅과 구분)
 
 _prev_jab_wr   = None
 _prev_cross_wr = None
@@ -264,15 +266,19 @@ def classify_from_buf(side, sw, el_buf, ea_buf, wy_buf):
     min_el = min(el_buf) if el_buf else 1.0      # 가장 팔꿈치가 높은 순간
     min_ea = min(ea_buf) if ea_buf else 180.0    # 가장 팔꿈치가 굽은 순간
 
-    # 어퍼컷: 손목이 버퍼 시작보다 충분히 올라갔고 팔꿈치가 굽어있음
+    # 어퍼컷: 손목이 충분히 올라가고, 팔꿈치가 굽어있고, 팔꿈치가 어깨 아래에 있어야 함
+    # min_el > UPPER_ELBOW_LOW: 팔꿈치가 어깨보다 아래 (훅은 어깨 높이, 양수 작음)
     wy_list = list(wy_buf)
     if wy_list:
         rise = (wy_list[0] - min(wy_list)) / (sw + 1e-6)  # 위로 이동 = 양수
-        if rise > UPPER_RISE_THRESH and min_ea < UPPER_ELBOW_ANGLE:
+        if (rise > UPPER_RISE_THRESH and min_ea < UPPER_ELBOW_ANGLE
+                and min_el > UPPER_ELBOW_LOW):
             return 'uppercut'
 
-    # 훅: 팔꿈치가 어깨 높이까지 올라왔고 팔꿈치가 굽어있음
-    if min_el < HOOK_ELBOW_THRESH and min_ea < HOOK_ELBOW_ANGLE:
+    # 훅: 팔꿈치가 어깨 높이까지 실제로 올라온 프레임이 충분히 있어야 함
+    hook_frames = sum(1 for el, ea in zip(el_buf, ea_buf)
+                      if el < HOOK_ELBOW_THRESH and ea < HOOK_ELBOW_ANGLE)
+    if hook_frames >= HOOK_MIN_FRAMES:
         return 'hook'
 
     return 'jab' if side == 'lead' else 'cross'
@@ -392,24 +398,40 @@ def calc_posture(kp, sc, sw):
     r_ydiff = (kp[CROSS_WR][1]- kp[CROSS_SH][1]) / sw
     ref_l   = POSE_DNA['guard_l_ydiff']
     ref_r   = POSE_DNA['guard_r_ydiff']
-    tol_g   = 0.18
+    tol_g   = 0.25
 
     l_err = l_ydiff - ref_l; r_err = r_ydiff - ref_r
-    guard_score = 35
-    guard_msg   = 'Guard 좋아!'
-    guard_col   = (0,220,100)
-    if abs(l_err) > tol_g:
-        guard_score -= 18
+
+    # 비례 감점: tol_g 이내 → 만점, 초과 → 벗어난 정도에 비례해 감소
+    def _partial(err, mx):
+        if abs(err) <= tol_g: return mx
+        return max(0, int(mx * max(0.0, 1.0 - (abs(err)-tol_g)/tol_g)))
+
+    l_score = _partial(l_err, 18)
+    r_score = _partial(r_err, 17)
+    guard_score = l_score + r_score
+
+    # 메시지 — 너무 낮음/너무 높음 모두 피드백
+    if l_score < 18:
         if l_err > 0:
-            issues.append((0,'잽 가드 올려','잽손 올려!',18,(0,60,255)))
-            guard_msg='잽손 가드 내려감'; guard_col=(0,60,255)
-    if abs(r_err) > tol_g:
-        guard_score -= 17
+            issues.append((0,'잽 가드 올려','잽손 올려!', 18-l_score, (0,60,255)))
+        else:
+            issues.append((0,'잽 가드 내려','잽손 내려!', 18-l_score, (0,165,255)))
+    if r_score < 17:
         if r_err > 0:
-            issues.append((0,'크로스 가드 올려','크로스손 올려!',17,(0,60,255)))
-            if guard_score < 35: guard_msg='양손 가드 내려감'
-            else: guard_msg='크로스손 가드 내려감'; guard_col=(0,60,255)
-    guard_score = max(0, guard_score)
+            issues.append((0,'크로스 가드 올려','크로스손 올려!', 17-r_score, (0,60,255)))
+        else:
+            issues.append((0,'크로스 가드 내려','크로스손 내려!', 17-r_score, (0,165,255)))
+
+    l_ok = l_score == 18; r_ok = r_score == 17
+    if l_ok and r_ok:
+        guard_msg='Guard 좋아!'; guard_col=(0,220,100)
+    elif not l_ok and not r_ok:
+        guard_msg='양손 가드 조정'; guard_col=(0,60,255)
+    elif not l_ok:
+        guard_msg=('잽손 가드 내려감' if l_err>0 else '잽손 너무 높음'); guard_col=(0,60,255)
+    else:
+        guard_msg=('크로스손 가드 내려감' if r_err>0 else '크로스손 너무 높음'); guard_col=(0,60,255)
 
     # ── 스탠스 (25점) — 엉덩이/발목 중 사용 가능한 것 ──────────────
     stance_score = 0; stance_msg = '스탠스 정보 없음'; stance_col = (120,120,120)
@@ -451,21 +473,29 @@ def calc_posture(kp, sc, sw):
         head_msg='턱 당겨!'; head_col=(0,165,255)
         issues.append((2,'턱 당기세요','턱 당겨!',20-head_score,(0,165,255)))
 
-    # ── 팔꿈치 (20점) — 가드 중 팔꿈치 위치 ────────────────────────
+    # ── 팔꿈치 (20점) — 손목 기준 상대 위치로 체크 (가드 조건과 상충 없음)
     l_el_y = (kp[JAB_EL][1]  - kp[JAB_SH][1])  / sw
     r_el_y = (kp[CROSS_EL][1]- kp[CROSS_SH][1]) / sw
-    # 가드 중 팔꿈치는 어깨 아래 일정 거리 (0.2~0.5*sw)
-    el_ok_l = 0.1 < l_el_y < 0.55
-    el_ok_r = 0.1 < r_el_y < 0.55
+    # 팔꿈치가 손목보다 아래 = 가드 자세 유지, AND 너무 처지지 않음 (0.60 이내)
+    el_ok_l = (l_el_y > l_ydiff) and (l_el_y < 0.60)
+    el_ok_r = (r_el_y > r_ydiff) and (r_el_y < 0.60)
     elbow_score = (10 if el_ok_l else 0) + (10 if el_ok_r else 0)
     if el_ok_l and el_ok_r:
         el_msg='팔꿈치 자세 좋아!'; el_col=(0,220,100)
     elif not el_ok_l:
-        el_msg='잽 팔꿈치 내려!'; el_col=(0,165,255)
-        issues.append((3,'잽 팔꿈치 내려','팔꿈치 내려!',10,(0,165,255)))
+        if l_el_y >= 0.60:
+            el_msg='잽 팔꿈치 올려!'; el_col=(0,165,255)
+            issues.append((3,'잽 팔꿈치 올려','팔꿈치 올려!',10,(0,165,255)))
+        else:
+            el_msg='잽 팔꿈치 내려!'; el_col=(0,165,255)
+            issues.append((3,'잽 팔꿈치 내려','팔꿈치 내려!',10,(0,165,255)))
     else:
-        el_msg='크로스 팔꿈치 내려!'; el_col=(0,165,255)
-        issues.append((3,'크로스 팔꿈치 내려','팔꿈치 내려!',10,(0,165,255)))
+        if r_el_y >= 0.60:
+            el_msg='크로스 팔꿈치 올려!'; el_col=(0,165,255)
+            issues.append((3,'크로스 팔꿈치 올려','팔꿈치 올려!',10,(0,165,255)))
+        else:
+            el_msg='크로스 팔꿈치 내려!'; el_col=(0,165,255)
+            issues.append((3,'크로스 팔꿈치 내려','팔꿈치 내려!',10,(0,165,255)))
 
     total = guard_score + stance_score + head_score + elbow_score
     if total >= 85:   grade,gcol = 'S',(0,255,120)
@@ -524,18 +554,21 @@ def draw_score_panel(frame, total, grade, gcol, items):
     cv2.addWeighted(ov,0.65,frame,0.35,0,frame)
 
     y = py
-    for score,mx,label,_,col in items:
+    for score,mx,_,_,col in items:
         bw=160
         cv2.rectangle(frame,(px,y),(px+bw,y+13),(50,50,60),-1)
         cv2.rectangle(frame,(px,y),(px+int(bw*score/mx),y+13),col,-1)
-        cv2.putText(frame,f'{label}: {score}/{mx}',(px,y-5),
-                    cv2.FONT_HERSHEY_SIMPLEX,0.42,(200,200,200),1)
         y += 35
     cv2.putText(frame,f"TOTAL: {total}/100  [{grade}]",
                 (px,y+16),cv2.FONT_HERSHEY_SIMPLEX,0.72,gcol,2)
 
+    # 한 번의 PIL 패스로 모든 한글 텍스트 렌더링
     pil  = PILImage.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil)
+    y = py
+    for score,mx,label,_,_ in items:
+        draw.text((px,y-20), f'{label}: {score}/{mx}', font=F_SM, fill=(200,200,200))
+        y += 35
     my = h-5-len(items)*26
     for i,(_,_,_,msg,col) in enumerate(items):
         b,g,r = col

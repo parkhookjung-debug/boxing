@@ -43,6 +43,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_FILES = [
     os.path.join(BASE_DIR, "LIM_full_data1.csv"),
     os.path.join(BASE_DIR, "LIM_full_data2.csv"),
+    os.path.join(BASE_DIR, "LIM_full_data5.csv"),
 ]
 OUTPUT_DNA = os.path.join(BASE_DIR, "LIM_DNA.csv")
 

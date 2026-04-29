@@ -128,11 +128,11 @@ RESULT_DUR         = 0.8
 SPEED_ALERT_DUR    = 2.5
 
 BLOCK_NOSE_THRESH  = 0.10
-SLIP_THRESH        = 0.28
+SLIP_THRESH        = 0.20
 GUARD_DROP_THRESH  = 0.55
-PUNCH_VEL          = 0.18    # 프레임간 속도 (낮게 — extension이 주 필터)
-PUNCH_EXTEND       = 0.38    # 베이스라인 대비 최소 이동거리 (sw 배수)
-PUNCH_DOM          = 1.4     # 한 팔이 다른 팔보다 이만큼 더 빨라야
+PUNCH_VEL          = 0.18    # 프레임간 수평 속도 임계
+PUNCH_EXTEND       = 0.30    # 베이스라인 대비 최소 이동거리 (sw 배수)
+PUNCH_DOM          = 1.25    # 한 팔이 다른 팔보다 이만큼 더 빨라야
 COUNTER_DELAY      = 0.45    # 블로킹 자세 충분히 풀릴 시간
 
 VALID_DEF = {
@@ -154,13 +154,14 @@ _countered   = False; _result_ok   = False
 _phase_start = 0.0;  _cntdn = 3;  _score = 0
 
 _prev_kp_m          = None
-_vel_buf_r          = deque(maxlen=3)
-_vel_buf_l          = deque(maxlen=3)
+_vel_buf_r          = deque(maxlen=5)
+_vel_buf_l          = deque(maxlen=5)
 _punch_base_r       = None
 _punch_base_l       = None
 _warn_dur           = 1.8
 _defend_dur         = 1.4
 _defend_phase_start = 0.0
+_slip_buf           = deque(maxlen=3)   # 슬립 연속 프레임 확인용
 
 _speed_mode  = False; _speed_mult = 1.0; _speed_round = 0
 _react_times = []
@@ -318,10 +319,10 @@ def detect_punch(kp_m, sw):
     if _prev_kp_m is None or _punch_base_r is None:
         _prev_kp_m=kp_m.copy(); return None
     arms=spatial_arms(kp_m); r_wr=arms['r'][2]; l_wr=arms['l'][2]
-    dr_x=kp_m[r_wr][0]-_prev_kp_m[r_wr][0]; dr_y=kp_m[r_wr][1]-_prev_kp_m[r_wr][1]
-    dl_x=kp_m[l_wr][0]-_prev_kp_m[l_wr][0]; dl_y=kp_m[l_wr][1]-_prev_kp_m[l_wr][1]
-    vr=math.sqrt(dr_x**2+dr_y**2)/sw if abs(dr_x)>=abs(dr_y) else 0.0
-    vl=math.sqrt(dl_x**2+dl_y**2)/sw if abs(dl_x)>=abs(dl_y) else 0.0
+    dr_x=kp_m[r_wr][0]-_prev_kp_m[r_wr][0]
+    dl_x=kp_m[l_wr][0]-_prev_kp_m[l_wr][0]
+    vr=max(0.0,-dr_x)/sw   # RIGHT 펀치: 미러 좌표에서 왼쪽으로 이동해야 유효
+    vl=max(0.0, dl_x)/sw  # LEFT  펀치: 미러 좌표에서 오른쪽으로 이동해야 유효
     _prev_kp_m=kp_m.copy(); _vel_buf_r.append(vr); _vel_buf_l.append(vl)
     er=math.sqrt((kp_m[r_wr][0]-_punch_base_r[0])**2+(kp_m[r_wr][1]-_punch_base_r[1])**2)/sw
     el=math.sqrt((kp_m[l_wr][0]-_punch_base_l[0])**2+(kp_m[l_wr][1]-_punch_base_l[1])**2)/sw
@@ -346,6 +347,7 @@ def start_attack():
     _defended=False; _counter_arm=None; _countered=False; _result_ok=False
     _prev_kp_m=None; _vel_buf_r.clear(); _vel_buf_l.clear()
     _punch_base_r=None; _punch_base_l=None
+    _slip_buf.clear()
 
 def start_round_combo():
     global _combo,_combo_idx,_warn_dur,_defend_dur
@@ -526,6 +528,16 @@ def highlight_arm(frame,kp_m,sc,arm,col):
     if sc[idxs[2]]>VIS_MIN:
         cv2.circle(frame,(int(kp_m[idxs[2]][0]),int(kp_m[idxs[2]][1])),12,col,-1)
 
+def highlight_nose(frame,kp_m,sc,col):
+    if sc[KP_NOSE]>VIS_MIN:
+        nx,ny=int(kp_m[KP_NOSE][0]),int(kp_m[KP_NOSE][1])
+        cv2.circle(frame,(nx,ny),22,col,4)
+        cv2.circle(frame,(nx,ny),10,col,-1)
+        # 코→양쪽 어깨 선 강조 (팔 강조와 비슷한 느낌)
+        for sh in [KP_L_SH,KP_R_SH]:
+            if sc[sh]>VIS_MIN:
+                cv2.line(frame,(nx,ny),(int(kp_m[sh][0]),int(kp_m[sh][1])),col,4)
+
 def draw_center_line(frame,kp_m,sw,h):
     sh_cx=int((kp_m[KP_L_SH][0]+kp_m[KP_R_SH][0])/2)
     for y in range(0,h,24): cv2.line(frame,(sh_cx,y),(sh_cx,min(y+12,h)),(90,90,90),1)
@@ -607,12 +619,23 @@ while cap.isOpened():
         elif _sub=='DEFEND':
             draw_defend_phase(disp,w,h,attack,elapsed)
             if kp_m is not None and not _defended:
-                defense=get_defense(kp_m,sw)
+                _raw=get_defense(kp_m,sw)
+                _slip_buf.append(_raw)
+                # 블록은 즉시 인정, 슬립은 2프레임 연속 일치해야 확정
+                if _raw and not _raw.startswith('SLIP'):
+                    defense=_raw
+                elif len(_slip_buf)>=2 and _slip_buf[-1]==_slip_buf[-2] and _slip_buf[-1]:
+                    defense=_slip_buf[-1]
+                else:
+                    defense=None
                 if defense and defense in VALID_DEF.get(attack,{}):
                     _react_times.append(now-_defend_phase_start)
                     _defended=True; _counter_arm=VALID_DEF[attack][defense]
-                    arm_kw='RIGHT' if 'R' in defense else 'LEFT'
-                    highlight_arm(disp,kp_m,sc,arm_kw,(0,255,100))
+                    if defense.startswith('SLIP'):
+                        highlight_nose(disp,kp_m,sc,(0,255,100))
+                    else:
+                        arm_kw='RIGHT' if 'R' in defense else 'LEFT'
+                        highlight_arm(disp,kp_m,sc,arm_kw,(0,255,100))
                     _snd(SND_DEFEND)
                     if _combo_idx<len(_combo)-1:
                         _combo_idx+=1; start_attack()
@@ -630,7 +653,8 @@ while cap.isOpened():
             if kp_m is not None:
                 if elapsed<COUNTER_DELAY:
                     _prev_kp_m=kp_m.copy()
-                    set_punch_baseline(kp_m)
+                    if _punch_base_r is None:
+                        set_punch_baseline(kp_m)  # 딜레이 시작 첫 프레임에 한 번만 고정
                 elif not _countered:
                     punch=detect_punch(kp_m,sw)
                     if punch==_counter_arm:

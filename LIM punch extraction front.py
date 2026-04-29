@@ -12,7 +12,7 @@ import csv, math, os
 import numpy as np
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-DATA_FILES = ['LIM_full_data4.csv', 'LIM_full_data5.csv']
+DATA_FILES = ['LIM_full_data3.csv', 'LIM_full_data4.csv']
 OUT_PATH   = os.path.join(BASE_DIR, 'LIM_punch_DNA_front.csv')
 
 # ── 파라미터 ──────────────────────────────────────────────────────
