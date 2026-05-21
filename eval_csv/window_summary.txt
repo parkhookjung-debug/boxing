@@ -1,0 +1,45 @@
+=== 윈도우 분류기 — 이벤트 단위 LOVO 평가 ===
+트래커: enter=0.5 min_run=3 refractory=6  match_win=±12
+GT 이벤트: 259   FP: 31   FN: 28
+전체 정확도: 0.7336   분류 정확도(매칭분): 0.8225
+펀치 Macro-F1: 0.7695   Weighted-F1: 0.7790
+
+              precision    recall  f1-score   support
+
+         jab       0.69      0.71      0.70        52
+       cross       0.71      0.76      0.74        51
+        hook       0.93      0.71      0.81        87
+    uppercut       0.95      0.75      0.84        69
+        NONE       0.00      0.00      0.00         0
+
+    accuracy                           0.73       259
+   macro avg       0.65      0.59      0.62       259
+weighted avg       0.84      0.73      0.78       259
+
+── 파일별 ──
+  LIM_full_data1.csv     GT= 24 Pred=  6 match=  6 FN=18 FP=  0
+  LIM_full_data2.csv     GT= 24 Pred= 33 match= 23 FN= 1 FP= 10
+  LIM_full_data3.csv     GT= 15 Pred=  8 match=  7 FN= 8 FP=  1
+  LIM_full_data4.csv     GT= 14 Pred= 14 match= 13 FN= 1 FP=  1
+  LIM_full_data5.csv     GT= 20 Pred= 28 match= 20 FN= 0 FP=  8
+  LIM_full_data6.csv     GT= 40 Pred= 40 match= 40 FN= 0 FP=  0
+  LIM_full_data7.csv     GT= 68 Pred= 72 match= 68 FN= 0 FP=  4
+  LIM_full_data8.csv     GT= 54 Pred= 61 match= 54 FN= 0 FP=  7
+
+── 오분류 (매칭됐지만 틀림) ──
+  GT=hook       → PRED=cross       ×10
+  GT=hook       → PRED=jab         ×8
+  GT=uppercut   → PRED=jab         ×6
+  GT=jab        → PRED=hook        ×4
+  GT=jab        → PRED=cross       ×4
+  GT=cross      → PRED=jab         ×3
+  GT=jab        → PRED=uppercut    ×2
+  GT=uppercut   → PRED=cross       ×2
+  GT=cross      → PRED=hook        ×1
+  GT=hook       → PRED=uppercut    ×1
+
+── 미감지 (FN) ──
+  GT=uppercut   → 미감지  ×9
+  GT=cross      → 미감지  ×8
+  GT=hook       → 미감지  ×6
+  GT=jab        → 미감지  ×5
