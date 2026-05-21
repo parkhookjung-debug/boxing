@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "feature_order": [
+    "guard_lead_height",
+    "guard_rear_height",
+    "guard_symmetry",
+    "head_height",
+    "head_stability",
+    "lean_forward",
+    "lean_variability",
+    "stance_width",
+    "stance_variability",
+    "lead_hand_activity",
+    "rear_hand_activity",
+    "hand_activity_balance",
+    "lead_arm_extension",
+    "rear_arm_extension",
+    "extension_balance",
+    "lead_elbow_compactness",
+    "rear_elbow_compactness",
+    "wrist_speed_mean",
+    "wrist_speed_burst",
+    "rhythm_variability",
+    "vertical_motion",
+    "lateral_motion"
+  ],
+  "profiles": {
+    "soviet_outboxing": {
+      "display_name": "Soviet Out-Boxing",
+      "source_fighter": "Bivol",
+      "description": "Distance control, straight punches, measured rhythm, and stable posture.",
+      "training_focus": [
+        "Jab control and step-out exits",
+        "Straight punch recovery",
+        "Long-range stance stability"
+      ],
+      "source_files": [
+        "bivol_full_data.csv",
+        "bivol_full_data2.csv",
+        "bivol_full_data3.csv",
+        "bivol_full_data4.csv"
+      ],
+      "frame_count": 1984,
+      "features": {
+        "guard_lead_height": -0.889105,
+        "guard_rear_height": -0.855241,
+        "guard_symmetry": -0.033864,
+        "head_height": 0.512862,
+        "head_stability": -1.275111,
+        "lean_forward": 0.171843,
+        "lean_variability": 1.746085,
+        "stance_width": 0.763255,
+        "stance_variability": 1.202951,
+        "lead_hand_activity": 0.556289,
+        "rear_hand_activity": 0.564515,
+        "hand_activity_balance": 0.99266,
+        "lead_arm_extension": 1.967755,
+        "rear_arm_extension": 1.820885,
+        "extension_balance": 0.961234,
+        "lead_elbow_compactness": 0.51502,
+        "rear_elbow_compactness": 0.590477,
+        "wrist_speed_mean": 0.560402,
+        "wrist_speed_burst": 0.994913,
+        "rhythm_variability": 2.116556,
+        "vertical_motion": 0.149883,
+        "lateral_motion": 0.440733
+      }
+    },
+    "mexican_pressure_counter": {
+      "display_name": "Mexican Pressure Counter",
+      "source_fighter": "Canelo",
+      "description": "Forward pressure, compact guard, body/head level changes, and counters.",
+      "training_focus": [
+        "Compact hook mechanics",
+        "Pressure steps after defense",
+        "Body-to-head punch transitions"
+      ],
+      "source_files": [
+        "canelo_full_data.csv",
+        "canelo_full_data2.csv",
+        "canelo_full_data3.csv",
+        "canelo_full_data4.csv",
+        "canelo_full_data7.csv"
+      ],
+      "frame_count": 2268,
+      "features": {
+        "guard_lead_height": -0.871034,
+        "guard_rear_height": -0.648909,
+        "guard_symmetry": -0.222124,
+        "head_height": 0.42548,
+        "head_stability": -0.738184,
+        "lean_forward": -0.016839,
+        "lean_variability": 1.119252,
+        "stance_width": 0.699748,
+        "stance_variability": 0.533687,
+        "lead_hand_activity": 0.472737,
+        "rear_hand_activity": 0.331299,
+        "hand_activity_balance": 0.82409,
+        "lead_arm_extension": 1.431965,
+        "rear_arm_extension": 1.620603,
+        "extension_balance": 0.938204,
+        "lead_elbow_compactness": 0.571814,
+        "rear_elbow_compactness": 0.580459,
+        "wrist_speed_mean": 0.402018,
+        "wrist_speed_burst": 0.772503,
+        "rhythm_variability": 1.846599,
+        "vertical_motion": 0.116189,
+        "lateral_motion": 0.287601
+      }
+    },
+    "american_speed_boxer": {
+      "display_name": "American Speed Boxer",
+      "source_fighter": "Garcia",
+      "description": "Hand speed, rhythm changes, sharp entries, and fast punch release.",
+      "training_focus": [
+        "Explosive first punch",
+        "Tempo changes",
+        "Fast hand return after combinations"
+      ],
+      "source_files": [
+        "garcia_full_data.csv",
+        "garcia_full_data2.csv",
+        "garcia_full_data3.csv",
+        "garcia_full_data4.csv",
+        "garcia_full_data5.csv",
+        "garcia_full_data6.csv"
+      ],
+      "frame_count": 2007,
+      "features": {
+        "guard_lead_height": -0.793548,
+        "guard_rear_height": -0.778377,
+        "guard_symmetry": -0.015171,
+        "head_height": 0.491469,
+        "head_stability": -0.806274,
+        "lean_forward": -0.393099,
+        "lean_variability": 1.894114,
+        "stance_width": 0.763589,
+        "stance_variability": 0.921476,
+        "lead_hand_activity": 0.434157,
+        "rear_hand_activity": 0.427268,
+        "hand_activity_balance": 0.992003,
+        "lead_arm_extension": 1.824277,
+        "rear_arm_extension": 1.775745,
+        "extension_balance": 0.986519,
+        "lead_elbow_compactness": 0.603294,
+        "rear_elbow_compactness": 0.560011,
+        "wrist_speed_mean": 0.430712,
+        "wrist_speed_burst": 1.003215,
+        "rhythm_variability": 1.080499,
+        "vertical_motion": 0.107619,
+        "lateral_motion": 0.332351
+      }
+    },
+    "lim_adaptive_hybrid": {
+      "display_name": "LIM Adaptive Hybrid",
+      "source_fighter": "LIM",
+      "description": "Personalized LIM reference style built from the user's own labeled sessions.",
+      "training_focus": [
+        "Personal baseline refinement",
+        "Punch recognition consistency",
+        "Style blend optimization"
+      ],
+      "source_files": [
+        "LIM_full_data1.csv",
+        "LIM_full_data2.csv",
+        "LIM_full_data3.csv",
+        "LIM_full_data4.csv",
+        "LIM_full_data5.csv",
+        "LIM_full_data6.csv",
+        "LIM_full_data7.csv",
+        "LIM_full_data8.csv"
+      ],
+      "frame_count": 7593,
+      "features": {
+        "guard_lead_height": -0.094411,
+        "guard_rear_height": -0.181996,
+        "guard_symmetry": -0.087585,
+        "head_height": 0.414478,
+        "head_stability": -0.719294,
+        "lean_forward": -0.041661,
+        "lean_variability": 0.269768,
+        "stance_width": 1.09919,
+        "stance_variability": 2.005265,
+        "lead_hand_activity": 0.182341,
+        "rear_hand_activity": 0.179918,
+        "hand_activity_balance": 0.993311,
+        "lead_arm_extension": 2.472119,
+        "rear_arm_extension": 1.706171,
+        "extension_balance": 0.816684,
+        "lead_elbow_compactness": 0.54427,
+        "rear_elbow_compactness": 0.47446,
+        "wrist_speed_mean": 0.181129,
+        "wrist_speed_burst": 0.375723,
+        "rhythm_variability": 0.712118,
+        "vertical_motion": 0.030687,
+        "lateral_motion": 0.15351
+      }
+    }
+  }
+}
