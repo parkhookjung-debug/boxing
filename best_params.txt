@@ -1,0 +1,6 @@
+# 최적 파라미터  (weighted F1=0.4414, acc=0.4516)
+vel_start = 0.018
+dom_ratio = 1.05
+punch_cd = 6
+ew_hook = 0.26
+up_vel = 0.09

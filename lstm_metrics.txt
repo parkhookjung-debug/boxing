@@ -1,0 +1,10 @@
+              precision    recall  f1-score   support
+
+         jab       0.00      0.00      0.00        11
+       cross       0.67      0.89      0.76         9
+        hook       0.00      0.00      0.00         2
+    uppercut       0.50      0.50      0.50         8
+
+    accuracy                           0.40        30
+   macro avg       0.29      0.35      0.32        30
+weighted avg       0.33      0.40      0.36        30

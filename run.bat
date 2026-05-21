@@ -1,0 +1,6 @@
+@echo off
+REM 사용법: run.bat extract_lim
+REM         run.bat label_tool "LIM 1.mp4" --out LIM1_labels.csv
+REM         run.bat grid_search --gt_labels LIM1_labels.csv ...
+REM         run.bat train_lstm --gt_labels LIM1_labels.csv ...
+D:\Python314\python.exe %1.py %2 %3 %4 %5 %6 %7 %8

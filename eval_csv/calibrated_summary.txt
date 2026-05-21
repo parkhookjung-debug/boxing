@@ -1,0 +1,29 @@
+Calibrated punch classifier evaluation
+NOTE: This is a personalization/calibration score, not a holdout benchmark.
+Model: gb
+Accuracy: 0.9740
+Weighted F1: 0.9863
+False Neg: 2
+False Pos: 40
+
+Per file:
+  ('LIM_full_data1.csv', 24, 39, 24, 0, 15)
+  ('LIM_full_data2.csv', 24, 40, 24, 0, 16)
+  ('LIM_full_data3.csv', 15, 18, 14, 1, 4)
+  ('LIM_full_data4.csv', 14, 18, 13, 1, 5)
+
+              precision    recall  f1-score   support
+
+         jab       1.00      1.00      1.00        23
+       cross       1.00      1.00      1.00        18
+        hook       1.00      0.90      0.95        20
+    uppercut       1.00      1.00      1.00        16
+        NONE       0.00      0.00      0.00         0
+
+    accuracy                           0.97        77
+   macro avg       0.80      0.78      0.79        77
+weighted avg       1.00      0.97      0.99        77
+
+
+Failure cases:
+  GT=hook       -> PRED=NONE       x2

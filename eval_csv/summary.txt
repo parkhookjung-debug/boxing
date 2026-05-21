@@ -1,0 +1,27 @@
+═══ Boxing Coach 5 — CSV 기반 성능 평가 ═══
+처리 프레임: 0
+
+━━ 펀치 분류 (extraction.py GT vs coach5 Pred) ━━
+  GT 이벤트   : 259개
+  False Neg   : 16 (GT 감지됐지만 coach5가 미감지)
+  False Pos   : 218 (coach5가 감지했지만 GT에 없음)
+  Accuracy    : 0.9382
+
+              precision    recall  f1-score   support
+
+         jab       1.00      0.92      0.96        52
+       cross       1.00      0.98      0.99        51
+        hook       1.00      0.92      0.96        87
+    uppercut       1.00      0.94      0.97        69
+        NONE       0.00      0.00      0.00         0
+
+    accuracy                           0.94       259
+   macro avg       0.80      0.75      0.78       259
+weighted avg       1.00      0.94      0.97       259
+
+
+━━ Failure Cases ━━
+  GT=hook       → PRED=NONE        ×7
+  GT=jab        → PRED=NONE        ×4
+  GT=uppercut   → PRED=NONE        ×4
+  GT=cross      → PRED=NONE        ×1
