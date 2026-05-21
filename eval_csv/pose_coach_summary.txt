@@ -1,0 +1,45 @@
+=== lim_pose_coach_app.py — 오프라인 평가 ===
+GT 이벤트: 259   FP: 37   FN: 183
+매칭 정확도: 0.1699
+펀치 Macro-F1: 0.2520   Weighted-F1: 0.2551
+
+              precision    recall  f1-score   support
+
+         jab       0.39      0.25      0.31        52
+       cross       0.38      0.06      0.10        51
+        hook       0.67      0.11      0.20        87
+    uppercut       0.90      0.26      0.40        69
+        NONE       0.00      0.00      0.00         0
+
+    accuracy                           0.17       259
+   macro avg       0.47      0.14      0.20       259
+weighted avg       0.62      0.17      0.26       259
+
+
+── 파일별 ──
+  LIM_full_data1.csv     GT= 24 Pred=  8 match=  8 FN=16 FP=  0
+  LIM_full_data2.csv     GT= 24 Pred=  5 match=  5 FN=19 FP=  0
+  LIM_full_data3.csv     GT= 15 Pred=  0 match=  0 FN=15 FP=  0
+  LIM_full_data4.csv     GT= 14 Pred=  1 match=  1 FN=13 FP=  0
+  LIM_full_data5.csv     GT= 20 Pred=  7 match=  3 FN=17 FP=  4
+  LIM_full_data6.csv     GT= 40 Pred= 23 match= 22 FN=18 FP=  1
+  LIM_full_data7.csv     GT= 68 Pred= 44 match= 32 FN=36 FP= 12
+  LIM_full_data8.csv     GT= 54 Pred= 25 match=  5 FN=49 FP= 20
+
+── Failure cases (매칭됐지만 오분류) ──
+  GT=cross      → PRED=jab         ×12
+  GT=hook       → PRED=jab         ×8
+  GT=cross      → PRED=hook        ×3
+  GT=hook       → PRED=cross       ×3
+  GT=hook       → PRED=uppercut    ×1
+  GT=jab        → PRED=hook        ×1
+  GT=jab        → PRED=uppercut    ×1
+  GT=jab        → PRED=cross       ×1
+  GT=uppercut   → PRED=hook        ×1
+  GT=uppercut   → PRED=cross       ×1
+
+── 미감지 (FN) ──
+  GT=hook       → 미감지  ×65
+  GT=uppercut   → 미감지  ×49
+  GT=jab        → 미감지  ×36
+  GT=cross      → 미감지  ×33
