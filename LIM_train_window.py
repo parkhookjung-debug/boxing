@@ -35,8 +35,12 @@ import lim_punch_features as F
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-FILES = [f'LIM_full_data{i}.csv' for i in range(1, 9)]
-LABELS = [f'LIM{i}_labels.csv' for i in range(1, 9)]
+# 측면 영상만 사용 — 정면(LIM1·3·5)은 2D 분류기 입장에서 잽/크로스가
+# 카메라축(Z) 모션이라 화면상 거의 안 움직여 어퍼/훅 쏠림을 유발한다.
+# 측면 전용 코치로 한정 → 정면 데이터를 학습에서 제외 (CSV 자체는 보존).
+SIDE_IDX = [2, 4, 6, 7, 8]
+FILES = [f'LIM_full_data{i}.csv' for i in SIDE_IDX]
+LABELS = [f'LIM{i}_labels.csv' for i in SIDE_IDX]
 
 POS_HALF = 2      # 라벨 ±POS_HALF 프레임을 양성으로
 NEG_GAP = 10      # 라벨에서 NEG_GAP 초과 떨어진 프레임만 음성 후보
@@ -44,8 +48,27 @@ NEG_PER_VIDEO = 110
 SEED = 0
 
 
+def _video_samples(kps, label_idx, neg_take, n):
+    """한 kp 시퀀스 → 양성(라벨±POS_HALF)·음성(neg_take) 윈도우 표본."""
+    X, y = [], []
+    for i, lt in label_idx.items():
+        for off in range(-POS_HALF, POS_HALF + 1):
+            j = i + off
+            if 0 <= j < n:
+                X.append(F.window_feat(kps, j))
+                y.append(lt)
+    for i in neg_take:
+        X.append(F.window_feat(kps, int(i)))
+        y.append('none')
+    return X, y
+
+
 def build_video(fpath, lpath):
-    """한 영상 → (X, y, meta). meta 는 (kind, label) 표시용."""
+    """한 영상 → (X, y, n_orig).
+
+    앞 n_orig 행은 원본, 뒤는 수평반전 증강 표본(손잡이 불변 — 잽은 어느
+    손이든 잽). 같은 라벨·같은 음성 프레임을 반전해 분포를 맞춘다.
+    LOVO 평가는 원본 행만 테스트하므로 호출부가 n_orig 로 잘라 쓴다."""
     frame_nums, kps = F.load_kp_csv(fpath)
     labels = F.load_label_csv(lpath)
     pos = {fn: i for i, fn in enumerate(frame_nums)}
@@ -56,24 +79,18 @@ def build_video(fpath, lpath):
         if lf in pos:
             label_idx[pos[lf]] = lt
 
-    X, y = [], []
-    # 양성
-    for i, lt in label_idx.items():
-        for off in range(-POS_HALF, POS_HALF + 1):
-            j = i + off
-            if 0 <= j < n:
-                X.append(F.window_feat(kps, j))
-                y.append(lt)
-    # 음성 — 라벨에서 먼 프레임
+    # 음성 후보 — 라벨에서 먼 프레임 (원본·반전 표본이 동일 프레임 사용)
     far = [i for i in range(F.HALF, n - F.HALF)
            if all(abs(i - li) > NEG_GAP for li in label_idx)]
     rng = np.random.RandomState(SEED)
-    if far:
-        take = rng.choice(far, min(NEG_PER_VIDEO, len(far)), replace=False)
-        for i in take:
-            X.append(F.window_feat(kps, int(i)))
-            y.append('none')
-    return np.array(X, dtype=float), np.array(y)
+    neg_take = (rng.choice(far, min(NEG_PER_VIDEO, len(far)), replace=False)
+                if far else [])
+
+    Xo, yo = _video_samples(kps, label_idx, neg_take, n)
+    Xf, yf = _video_samples(F.flip_kp_sequence(kps), label_idx, neg_take, n)
+    X = np.array(Xo + Xf, dtype=float)
+    y = np.array(yo + yf)
+    return X, y, len(Xo)
 
 
 def make_model():
@@ -90,20 +107,23 @@ def main():
         if not (os.path.exists(fp) and os.path.exists(lp)):
             print(f'[skip] {fn}')
             continue
-        X, y = build_video(fp, lp)
-        data[fn] = (X, y)
-        print(f'{fn:22s} 표본 {len(X):4d}  {dict(Counter(y))}')
+        X, y, n_orig = build_video(fp, lp)
+        data[fn] = (X, y, n_orig)
+        print(f'{fn:22s} 표본 {len(X):4d} (원본 {n_orig} + 반전 '
+              f'{len(X) - n_orig})  {dict(Counter(y))}')
 
     if not data:
         raise SystemExit('데이터 없음')
 
     # ── LOVO 교차검증 (정직한 일반화 성능) ─────────────────
     print('\n=== Leave-one-video-out 교차검증 (프레임 단위) ===')
+    print('  학습 폴드: 원본+반전증강 / 테스트 폴드: 원본만 (정직한 추정)')
     all_true, all_pred = [], []
     for test_fn in data:
         Xtr = np.vstack([data[f][0] for f in data if f != test_fn])
         ytr = np.concatenate([data[f][1] for f in data if f != test_fn])
-        Xte, yte = data[test_fn]
+        Xte, yte, n_orig = data[test_fn]
+        Xte, yte = Xte[:n_orig], yte[:n_orig]   # 테스트는 원본만
         clf = make_model()
         clf.fit(Xtr, ytr)
         pred = clf.predict(Xte)
@@ -126,7 +146,7 @@ def main():
     print(f'펀치/none 이진 감지: Acc={accuracy_score(bt, bp):.4f}')
     print(classification_report(bt, bp, zero_division=0))
 
-    # ── 최종 모델: 전체 데이터 학습 ────────────────────────
+    # ── 최종 모델: 전체 데이터(원본+반전증강) 학습 ──────────
     Xall = np.vstack([data[f][0] for f in data])
     yall = np.concatenate([data[f][1] for f in data])
     final = make_model()

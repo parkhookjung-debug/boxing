@@ -44,6 +44,7 @@ KP_L_AN, KP_R_AN = 15, 16
 
 NEEDED = [KP_NOSE, KP_L_SH, KP_R_SH, KP_L_EL, KP_R_EL, KP_L_WR, KP_R_WR]
 VIS_MIN = 0.30
+TRACKED_VIS = VIS_MIN + 0.02
 
 SKELETON = [
     (KP_L_SH, KP_R_SH),
@@ -232,6 +233,75 @@ def opposite_side(side: str) -> str:
     return "rear" if side == "lead" else "lead"
 
 
+class RearHandTracker:
+    """Fill short rear-wrist dropouts from temporal and arm-geometry cues."""
+
+    def __init__(self, max_miss: int = 18):
+        self.max_miss = max_miss
+        self.prev_wrist: np.ndarray | None = None
+        self.prev_rel_elbow: np.ndarray | None = None
+        self.prev_vel = np.zeros(2, dtype=float)
+        self.missed = 0
+        self.orthodox: bool | None = None
+
+    def reset(self):
+        self.prev_wrist = None
+        self.prev_rel_elbow = None
+        self.prev_vel = np.zeros(2, dtype=float)
+        self.missed = 0
+
+    def update(self, kp: np.ndarray, sc: np.ndarray, orthodox: bool) -> tuple[np.ndarray, np.ndarray, bool]:
+        if self.orthodox is not None and self.orthodox != orthodox:
+            self.reset()
+        self.orthodox = orthodox
+
+        wr, el, sh = side_to_indices("rear", orthodox)
+        out_kp = kp.copy()
+        out_sc = sc.copy()
+
+        wrist_ok = sc[wr] >= VIS_MIN
+        elbow_ok = sc[el] >= VIS_MIN
+        shoulder_ok = sc[sh] >= VIS_MIN
+        filled = False
+
+        if wrist_ok:
+            wrist = kp[wr, :2].copy()
+            if self.prev_wrist is not None:
+                self.prev_vel = 0.65 * self.prev_vel + 0.35 * (wrist - self.prev_wrist)
+            self.prev_wrist = wrist
+            if elbow_ok:
+                self.prev_rel_elbow = wrist - kp[el, :2]
+            self.missed = 0
+            return out_kp, out_sc, filled
+
+        estimate = None
+        if elbow_ok and self.prev_rel_elbow is not None:
+            estimate = kp[el, :2] + self.prev_rel_elbow
+        elif self.prev_wrist is not None and self.missed < self.max_miss:
+            estimate = self.prev_wrist + self.prev_vel
+        elif elbow_ok and shoulder_ok:
+            upper = kp[el, :2] - kp[sh, :2]
+            estimate = kp[el, :2] + upper * 0.75
+
+        if estimate is not None:
+            estimate = np.maximum(estimate, 0.0)
+            out_kp[wr, :2] = estimate
+            out_sc[wr] = max(float(out_sc[wr]), TRACKED_VIS)
+            filled = True
+            if self.prev_wrist is not None:
+                self.prev_vel = 0.85 * self.prev_vel + 0.15 * (estimate - self.prev_wrist)
+            self.prev_wrist = estimate.copy()
+            if elbow_ok:
+                self.prev_rel_elbow = estimate - kp[el, :2]
+            self.missed += 1
+        else:
+            self.missed += 1
+            if self.missed > self.max_miss:
+                self.reset()
+
+        return out_kp, out_sc, filled
+
+
 def template_vector(kp: np.ndarray, scale: float) -> np.ndarray:
     center = (kp[KP_L_SH, :2] + kp[KP_R_SH, :2]) * 0.5
     values = []
@@ -396,13 +466,31 @@ def make_sequence_features_from_hist(hist: Deque[np.ndarray], side: str, orthodo
 
 
 def hook_gate(feat: list[float]) -> bool:
-    """True when the wrist stays close to the elbow, which is the main hook cue."""
+    """True for a compact side-view hook path.
+
+    Side-view hooks can move into camera depth instead of image x, so do not
+    require strong lateral travel. The important cues are a bent arm, compact
+    wrist-to-elbow distance, and not looking like a straight or uppercut.
+    """
     arm_ext, elbow_angle, _el_y, _el_lat, _wr_y, ew, _arm_dy_rise, wr_dx_abs, _dy_min, wr_dy_rise, _peak, _opp = feat
-    close_elbow_wrist = ew < 0.48
-    not_fully_straight = not (arm_ext > 1.05 and elbow_angle > 138)
-    enough_motion = wr_dx_abs > 0.16 or wr_dy_rise > 0.08
-    not_clear_uppercut = wr_dy_rise < 0.42
-    return close_elbow_wrist and not_fully_straight and enough_motion and not_clear_uppercut
+    compact_arm = ew < 0.78 and 55.0 <= elbow_angle <= 142.0
+    hook_motion = wr_dx_abs > 0.08 or _peak > 0.045
+    not_straight = not (arm_ext > 1.12 and elbow_angle > 136.0)
+    not_clear_uppercut = wr_dy_rise < 0.38
+    return compact_arm and hook_motion and not_straight and not_clear_uppercut
+
+
+def hook_frame_gate(kp: np.ndarray, side: str, orthodox: bool) -> bool:
+    wr, el, sh = side_to_indices(side, orthodox)
+    scale = shoulder_width(kp)
+    arm_ext = float(np.linalg.norm(kp[wr, :2] - kp[sh, :2]) / scale)
+    ew = float(np.linalg.norm(kp[wr, :2] - kp[el, :2]) / scale)
+    elbow_angle = angle3(kp[sh], kp[el], kp[wr])
+    elbow_y = float((kp[el, 1] - kp[sh, 1]) / scale)
+    compact_arm = ew < 0.78 and 55.0 <= elbow_angle <= 142.0
+    not_straight = not (arm_ext > 1.12 and elbow_angle > 136.0)
+    elbow_not_too_low = elbow_y < 0.55
+    return compact_arm and not_straight and elbow_not_too_low
 
 
 def uppercut_gate(feat: list[float]) -> bool:
@@ -441,7 +529,7 @@ def compact_frame_gate(kp: np.ndarray, side: str, orthodox: bool) -> bool:
     arm_ext = float(np.linalg.norm(kp[wr, :2] - kp[sh, :2]) / scale)
     ew = float(np.linalg.norm(kp[wr, :2] - kp[el, :2]) / scale)
     elbow_angle = angle3(kp[sh], kp[el], kp[wr])
-    return ew < 0.50 and not (arm_ext > 1.08 and elbow_angle > 138)
+    return ew < 0.72 and elbow_angle < 145 and not (arm_ext > 1.12 and elbow_angle > 138)
 
 
 def best_extension_frame(hist: Deque[np.ndarray], side: str, orthodox: bool) -> np.ndarray:
@@ -537,8 +625,10 @@ def combine_prediction(
         except Exception as exc:
             details.append(f"seq-error:{type(exc).__name__}")
 
-    if feat is not None and hook_gate(feat):
-        votes["hook"] += 7 if side == "rear" else 5
+    hook_ok = (feat is not None and hook_gate(feat)) or hook_frame_gate(kp, side, orthodox)
+
+    if hook_ok:
+        votes["hook"] += 8 if side == "rear" else 6
         details.append(f"ew-hook:{side}")
 
     if feat is not None and model is not None:
@@ -548,7 +638,7 @@ def combine_prediction(
             if hasattr(model, "predict_proba"):
                 probs = model.predict_proba([feat])[0]
                 proba = float(np.max(probs))
-            if pred == "hook" and not hook_gate(feat):
+            if pred == "hook" and not hook_ok:
                 if straight_gate(feat):
                     pred = "jab" if side == "lead" else "cross"
                     votes[pred] += 2
@@ -570,7 +660,7 @@ def combine_prediction(
 
     t_pred, _dist, t_conf = match_template(kp, side, view, templates)
     if t_pred:
-        if feat is not None and t_pred == "hook" and not hook_gate(feat):
+        if feat is not None and t_pred == "hook" and not hook_ok:
             details.append(f"tpl:skip-hook:{t_conf:.2f}")
         elif feat is not None and t_pred == "uppercut" and not uppercut_gate(feat):
             details.append(f"tpl:skip-upper:{t_conf:.2f}")
@@ -579,7 +669,7 @@ def combine_prediction(
             votes[t_pred] += tpl_weight
             details.append(f"tpl:{t_pred}:{t_conf:.2f}")
 
-    if feat is not None and hook_gate(feat):
+    if hook_ok:
         details.append("frame-straight:blocked-by-hook")
     elif straight_frame_gate(kp, side, orthodox):
         straight = "jab" if side == "lead" else "cross"
@@ -596,7 +686,7 @@ def combine_prediction(
 
     punch, weight = votes.most_common(1)[0]
     if feat is not None:
-        if punch == "hook" and not hook_gate(feat):
+        if punch == "hook" and not hook_ok:
             return None, 0.0, "reject-hook-gate"
         if punch == "uppercut" and not uppercut_gate(feat):
             return None, 0.0, "reject-upper-gate"
@@ -891,6 +981,7 @@ def main() -> int:
 
     orthodox = args.stance == "orthodox"
     detector = PunchDetector(model, seq_model, seq_half_window, templates, orthodox, args.view, model_window)
+    rear_tracker = RearHandTracker()
     win = "LIM Boxing Coach"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
 
@@ -917,6 +1008,7 @@ def main() -> int:
         if len(kps) > 0:
             kp = kps[0].astype(float)
             sc = scores[0].astype(float)
+            kp, sc, rear_filled = rear_tracker.update(kp, sc, orthodox)
             pose_ok = all(sc[i] > VIS_MIN for i in NEEDED)
             if pose_ok:
                 result = detector.update(kp, now)
@@ -927,8 +1019,10 @@ def main() -> int:
                 view_now = infer_view(kp) if args.view == "auto" else args.view
 
                 draw_text(display, f"POSTURE {p_score}/100  VIEW {view_now.upper()}  FPS {fps:.1f}", (24, 36), 0.72)
+                if rear_filled:
+                    draw_text(display, "REAR HAND TRACKED", (24, 64), 0.58, (80, 220, 255), 2)
                 for i, msg in enumerate(p_messages):
-                    draw_text(display, msg, (24, 68 + i * 28), 0.62, (210, 245, 210))
+                    draw_text(display, msg, (24, (96 if rear_filled else 68) + i * 28), 0.62, (210, 245, 210))
             else:
                 draw_text(display, "포즈를 더 잘 보이게 서주세요", (24, 42), 0.75, (70, 210, 255))
         else:
@@ -961,6 +1055,7 @@ def main() -> int:
         if key == ord("d"):
             orthodox = not orthodox
             detector.orthodox = orthodox
+            rear_tracker.reset()
 
     cap.release()
     cv2.destroyAllWindows()

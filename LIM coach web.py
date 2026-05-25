@@ -6,20 +6,17 @@ RTMPose (RTMO-s) | 측면 카메라 | 오르토독스 스탠스
 단축키
   Q / ESC   종료
   R         카운터 초기화
-  D         방향 전환 (우향/좌향)
+  D         화면 방향 전환 (우향/좌향)
+  T         스탠스 전환 (Orthodox/Southpaw)
   G         가이드(고스트) 토글
   V         음성 ON/OFF
   S         스냅샷 저장
 """
 
+import argparse, re
 import cv2, numpy as np, math, os, csv, time, threading
 from collections import deque
 from PIL import ImageFont, ImageDraw, Image as PILImage
-
-try:
-    from rtmlib import RTMO
-except ImportError:
-    raise SystemExit("pip install rtmlib onnxruntime")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -115,9 +112,17 @@ RTMO_URL = (
     'https://download.openmmlab.com/mmpose/v1/projects/rtmo/onnx_sdk/'
     'rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.zip'
 )
-print("RTMPose (RTMO-s) 로드 중...")
-pose_model = RTMO(RTMO_URL, backend='onnxruntime', device='cpu')
-print("모델 준비 완료")
+def build_rtmo_model(device='cpu'):
+    try:
+        from rtmlib import RTMO
+    except ImportError:
+        raise SystemExit("pip install rtmlib onnxruntime")
+    print(f"RTMPose (RTMO-s) loading on {device}...")
+    model = RTMO(RTMO_URL, backend='onnxruntime', device=device)
+    print("RTMPose ready")
+    return model
+
+pose_model = None
 
 # ══════════════════════════════════════════════════════
 # COCO 17 키포인트
@@ -137,11 +142,76 @@ VIS_MIN   = 0.30
 NEEDED_KP = [KP_L_SH, KP_R_SH, KP_L_WR, KP_R_WR, KP_L_EL, KP_R_EL, KP_NOSE]
 
 _facing_right = True
+_stance = 'orthodox'
+
+COCO_NAMES = [
+    'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
+    'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
+    'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
+    'left_knee', 'right_knee', 'left_ankle', 'right_ankle',
+]
+
+
+def infer_csv_path(source):
+    if not source:
+        return None
+    name = os.path.basename(str(source))
+    m = re.search(r'lim\s*(\d+)', name, re.IGNORECASE)
+    if not m:
+        return None
+    candidates = [
+        os.path.join(BASE_DIR, f'LIM_full_data{m.group(1)}.csv'),
+        os.path.join(BASE_DIR, 'csv_backup_rtmo', f'LIM_full_data{m.group(1)}.csv'),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def load_pose_csv(path):
+    frames, kps, scores = [], [], []
+    with open(path, newline='', encoding='utf-8') as f:
+        for row in csv.DictReader(f):
+            kp = np.zeros((17, 2), dtype=float)
+            sc = np.zeros(17, dtype=float)
+            for i, name in enumerate(COCO_NAMES):
+                kp[i, 0] = float(row[f'{name}_x'])
+                kp[i, 1] = float(row[f'{name}_y'])
+                sc[i] = float(row.get(f'{name}_v', 1.0))
+            frames.append(int(row['frame_number']))
+            kps.append(kp)
+            scores.append(sc)
+    return frames, kps, scores
+
+
+class CsvPoseProvider:
+    def __init__(self, path):
+        self.path = path
+        self.frames, self.kps, self.scores = load_pose_csv(path)
+        self.by_frame = {
+            fn: (kp, sc) for fn, kp, sc in zip(self.frames, self.kps, self.scores)
+        }
+        print(f"CSV pose loaded: {os.path.basename(path)} ({len(self.frames)} frames)")
+
+    def __call__(self, frame_number, frame_shape):
+        if not self.frames:
+            return [], []
+        if frame_number in self.by_frame:
+            kp_n, sc = self.by_frame[frame_number]
+        else:
+            idx = min(max(frame_number - 1, 0), len(self.frames) - 1)
+            kp_n, sc = self.kps[idx], self.scores[idx]
+        h, w = frame_shape[:2]
+        kp = kp_n.copy()
+        kp[:, 0] *= w
+        kp[:, 1] *= h
+        return [kp], [sc]
 
 def get_arm_indices():
-    if _facing_right:
-        return KP_R_WR, KP_R_SH, KP_R_EL, KP_L_WR, KP_L_SH, KP_L_EL
-    return KP_L_WR, KP_L_SH, KP_L_EL, KP_R_WR, KP_R_SH, KP_R_EL
+    if _stance == 'orthodox':
+        return KP_L_WR, KP_L_SH, KP_L_EL, KP_R_WR, KP_R_SH, KP_R_EL
+    return KP_R_WR, KP_R_SH, KP_R_EL, KP_L_WR, KP_L_SH, KP_L_EL
 
 # ══════════════════════════════════════════════════════
 # DNA
@@ -237,7 +307,7 @@ def angle3pt(ax,ay,bx,by,cx,cy):
 # ══════════════════════════════════════════════════════
 # 펀치 감지 (원본 동일)
 # ══════════════════════════════════════════════════════
-def classify_from_buf(side, sw, el_buf, ea_buf, wy_buf):
+def classify_from_buf(side, sw, el_buf, ea_buf, wy_buf, xy_buf=None):
     min_el = min(el_buf) if el_buf else 1.0
     min_ea = min(ea_buf) if ea_buf else 180.0
     wy_list = list(wy_buf)
@@ -245,8 +315,20 @@ def classify_from_buf(side, sw, el_buf, ea_buf, wy_buf):
         rise = (wy_list[0] - min(wy_list)) / (sw + 1e-6)
         if rise > 0.20 and min_ea < 120.0 and min_el > 0.15:
             return 'uppercut'
-    hook_frames = sum(1 for el,ea in zip(el_buf,ea_buf) if el < 0.05 and ea < 110.0)
-    if hook_frames >= 3: return 'hook'
+    lateral = 0.0
+    if xy_buf:
+        xs = [p[0] for p in xy_buf]
+        ys = [p[1] for p in xy_buf]
+        lateral = (max(xs) - min(xs)) / (sw + 1e-6)
+        vertical = (max(ys) - min(ys)) / (sw + 1e-6)
+    else:
+        vertical = 0.0
+    hook_frames = sum(
+        1 for el, ea in zip(el_buf, ea_buf)
+        if -0.18 < el < 0.28 and 75.0 < ea < 125.0
+    )
+    if hook_frames >= 2 and lateral > 0.18 and vertical < 0.45:
+        return 'hook'
     return 'jab' if side == 'lead' else 'cross'
 
 def update_punch_detect(kp, sc, now):
@@ -271,12 +353,12 @@ def update_punch_detect(kp, sc, now):
     peak_rear = max(_v_buf_rear) if _v_buf_rear else 0.0
     if (_prev_v_lead > VEL_START and v_lead <= VEL_START and
             peak_lead > peak_rear * DOM_RATIO and now - _punch_cd['lead'] > PUNCH_CD):
-        pt = classify_from_buf('lead', sw, _el_buf_lead, _ea_buf_lead, _wy_buf_lead)
+        pt = classify_from_buf('lead', sw, _el_buf_lead, _ea_buf_lead, _wy_buf_lead, _trail_lead)
         _last_pt['lead'] = pt; _punch_cd['lead'] = now
         _pending.append([EXT_DELAY, pt, 'lead'])
     if (_prev_v_rear > VEL_START and v_rear <= VEL_START and
             peak_rear > peak_lead * DOM_RATIO and now - _punch_cd['rear'] > PUNCH_CD):
-        pt = classify_from_buf('rear', sw, _el_buf_rear, _ea_buf_rear, _wy_buf_rear)
+        pt = classify_from_buf('rear', sw, _el_buf_rear, _ea_buf_rear, _wy_buf_rear, _trail_rear)
         _last_pt['rear'] = pt; _punch_cd['rear'] = now
         _pending.append([EXT_DELAY, pt, 'rear'])
     _prev_v_lead = v_lead; _prev_v_rear = v_rear
@@ -482,7 +564,9 @@ def render_sidebar(canvas, posture, now):
     draw_card(canvas, SB_X+PAD, cy, cw, 52)
     pil = bgr2pil(canvas); d = ImageDraw.Draw(pil)
     d.text((x0+10, cy+8),  "LIM KWANWOO", font=F_TITLE, fill=rgb(C_TEXT))
-    d.text((x0+10, cy+34), f"{'우향 Orthodox →' if _facing_right else '← 좌향 Southpaw'}", font=F_SMALL, fill=rgb(C_ACCENT))
+    facing = '우향' if _facing_right else '좌향'
+    stance = 'Orthodox' if _stance == 'orthodox' else 'Southpaw'
+    d.text((x0+10, cy+34), f"{facing} Side | {stance}", font=F_SMALL, fill=rgb(C_ACCENT))
     canvas[:] = pil2bgr(pil)
     cy += 60
 
@@ -631,24 +715,60 @@ def draw_ready_screen(canvas, pose_ok, stable):
 # ══════════════════════════════════════════════════════
 # 메인 루프
 # ══════════════════════════════════════════════════════
-cap = cv2.VideoCapture(0)
+parser = argparse.ArgumentParser(description='LIM boxing coach UI')
+parser.add_argument('--source', default='0', help='camera index or video path')
+parser.add_argument('--csv', default=None, help='pre-extracted LIM_full_data*.csv')
+parser.add_argument('--device', default='cpu', choices=['cpu', 'cuda'],
+                    help='RTMO device when CSV is not used')
+parser.add_argument('--stance', default='orthodox',
+                    choices=['orthodox', 'southpaw'],
+                    help='side-view stance: orthodox means left jab/right cross')
+parser.add_argument('--no-auto-csv', action='store_true',
+                    help='do not auto-match LIM N.mp4 to LIM_full_dataN.csv')
+args = parser.parse_args()
+
+_stance = args.stance
+
+source = int(args.source) if str(args.source).isdigit() else args.source
+is_camera = isinstance(source, int)
+csv_path = args.csv
+if csv_path and not os.path.isabs(csv_path):
+    csv_path = os.path.join(BASE_DIR, csv_path)
+if not csv_path and not is_camera and not args.no_auto_csv:
+    csv_path = infer_csv_path(args.source)
+
+csv_pose = None
+if csv_path:
+    if not os.path.exists(csv_path):
+        raise SystemExit(f'CSV not found: {csv_path}')
+    csv_pose = CsvPoseProvider(csv_path)
+else:
+    pose_model = build_rtmo_model(args.device)
+
+cap = cv2.VideoCapture(source)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
 cv2.namedWindow('BOXING COACH', cv2.WINDOW_NORMAL)
 cv2.resizeWindow('BOXING COACH', WIN_W, WIN_H)
 
+frame_no = 0
+
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret: break
+    frame_no += 1
     now = time.time()
 
     # 카메라는 원본 해상도, 캔버스는 1280x720
     fh, fw = frame.shape[:2]
     cam_frame = cv2.resize(frame, (CAM_W, WIN_H))
 
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    kps, scs  = pose_model(rgb_frame)
+    if csv_pose is not None:
+        kps, scs = csv_pose(frame_no, frame.shape)
+    else:
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        kps, scs  = pose_model(rgb_frame)
 
     pose_ok = len(kps) > 0
     kp = kps[0] if pose_ok else None
@@ -722,6 +842,8 @@ while cap.isOpened():
     elif key == ord('v'): _voice_on = not _voice_on
     elif key == ord('d'):
         _facing_right = not _facing_right
+    elif key == ord('t'):
+        _stance = 'southpaw' if _stance == 'orthodox' else 'orthodox'
         _prev_lead_wr = None; _prev_rear_wr = None
         _v_buf_lead.clear(); _v_buf_rear.clear()
     elif key == ord('s'):

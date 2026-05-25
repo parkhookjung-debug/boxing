@@ -122,9 +122,155 @@ def window_feat(kps, i):
 WINDOW_FEAT_DIM = FRAME_FEAT_DIM * WINDOW + 10
 
 
+# ── 모션 게이트 ─────────────────────────────────────────────
+# 정적인 자세는 펀치가 될 수 없다 (펀치 = 손목이 어깨 대비 빠르게 이동).
+# 단일 복서(LIM) 학습 모델은 LIM 의 "쉬는" 프레임도 늘 움직임이 있어,
+# 신규 사용자의 '완전 정적' 가드를 학습한 적이 없다 → 가장 가까운 펀치로
+# 오인(특히 어퍼). 어깨중심 기준 상대 손목속도가 임계 미만이면 none 으로
+# 강제하는 런타임 안전장치. 상대속도라 풋워크/바디무빙엔 둔감.
+MOTION_GATE_THR = 0.04    # 윈도우 최대 어깨상대 손목속도 < 이 값 → none
+
+
+def wrist_gate_speed(window):
+    """window: WINDOW개 kp (각 (17,>=2)).
+    어깨중심 기준 좌/우 손목의 윈도우 내 최대 상대 이동속도(몸통높이 정규화)."""
+    w = np.asarray(window, dtype=float)
+    sh_c = (w[:, L_SH, :2] + w[:, R_SH, :2]) * 0.5
+    s = body_scale(w[HALF])
+    g = 0.0
+    for wr in (L_WR, R_WR):
+        rel = w[:, wr, :2] - sh_c
+        spd = np.linalg.norm(np.diff(rel, axis=0), axis=1) / s
+        g = max(g, float(spd.max()))
+    return g
+
+
+# ── 1€ 필터 — 키포인트 지터링 제거 ──────────────────────────
+# 경량 포즈 모델은 정지 상태에서도 좌표가 미세하게 떨린다(jittering).
+# 단순 이동평균은 떨림과 함께 빠른 펀치 동작까지 뭉개지만, 1€ 필터는
+# 손이 느릴 때(가드)는 강하게 / 빠를 때(펀치)는 약하게 평활하므로
+# 펀치 속도 신호를 살리면서 떨림만 제거한다. dt 기반이라 모바일의
+# 가변 FPS 에도 강건하다. (Casiez, Roussel, Vogel 2012)
+#
+# 학습(LIM_train_window)·평가(eval_window)·앱이 모두 같은 인과적 필터를
+# 거치게 해 학습/런타임 좌표 분포를 일치시킨다 (load_kp_csv 가 기본 적용).
+# 값은 tune_filter.py 스윕으로 확정 (이벤트 LOVO Macro-F1 0.787→0.797).
+SMOOTH_MIN_CUTOFF = 1.0   # 정지 시 컷오프(Hz) — 낮을수록 더 부드러움
+SMOOTH_BETA = 10.0        # 속도 반응 계수 — 높을수록 빠른 동작의 지연↓
+SMOOTH_D_CUTOFF = 1.0     # 미분(속도) 추정용 컷오프
+DEFAULT_FPS = 30.0
+
+
+def _euro_alpha(cutoff, dt):
+    tau = 1.0 / (2.0 * math.pi * cutoff)
+    return 1.0 / (1.0 + tau / dt)
+
+
+class OneEuroFilter:
+    """스칼라 신호용 1€ 필터. 가변 dt 지원, 인과적(online)."""
+
+    def __init__(self, min_cutoff=SMOOTH_MIN_CUTOFF, beta=SMOOTH_BETA,
+                 d_cutoff=SMOOTH_D_CUTOFF):
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self._x = None       # 직전 필터링 값
+        self._dx = 0.0       # 직전 필터링 미분
+
+    def __call__(self, x, dt):
+        if self._x is None or dt <= 0:
+            self._x = x
+            return x
+        dx = (x - self._x) / dt
+        a_d = _euro_alpha(self.d_cutoff, dt)
+        dx_hat = a_d * dx + (1.0 - a_d) * self._dx
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        a = _euro_alpha(cutoff, dt)
+        x_hat = a * x + (1.0 - a) * self._x
+        self._x, self._dx = x_hat, dx_hat
+        return x_hat
+
+
+class KeypointFilter:
+    """키포인트 x/y 좌표마다 1€ 필터 적용. 시퀀스(영상)마다 새로 생성."""
+
+    def __init__(self, n_kp=17, min_cutoff=SMOOTH_MIN_CUTOFF,
+                 beta=SMOOTH_BETA, d_cutoff=SMOOTH_D_CUTOFF):
+        self.n_kp = n_kp
+        self._fx = [OneEuroFilter(min_cutoff, beta, d_cutoff)
+                    for _ in range(n_kp)]
+        self._fy = [OneEuroFilter(min_cutoff, beta, d_cutoff)
+                    for _ in range(n_kp)]
+
+    def apply(self, kp, dt):
+        """kp: (n_kp,>=2) → 평활된 (n_kp,2) ndarray."""
+        kp = np.asarray(kp, dtype=float)
+        out = np.array(kp[:, :2], dtype=float)
+        for i in range(self.n_kp):
+            out[i, 0] = self._fx[i](float(kp[i, 0]), dt)
+            out[i, 1] = self._fy[i](float(kp[i, 1]), dt)
+        return out
+
+
+def filter_kp_sequence(frame_nums, kps, fps=DEFAULT_FPS,
+                       min_cutoff=None, beta=None):
+    """CSV 키포인트 시퀀스를 런타임과 동일한 인과적 1€ 필터로 평활.
+
+    프레임 누락 구간은 frame_number 차이로 dt 를 보정한다.
+    min_cutoff/beta 를 생략하면 모듈 전역값(SMOOTH_*)을 호출 시점에 읽는다."""
+    if not kps:
+        return kps
+    if min_cutoff is None:
+        min_cutoff = SMOOTH_MIN_CUTOFF
+    if beta is None:
+        beta = SMOOTH_BETA
+    kf = KeypointFilter(n_kp=np.asarray(kps[0]).shape[0],
+                        min_cutoff=min_cutoff, beta=beta)
+    out, prev_fn = [], None
+    for fn, kp in zip(frame_nums, kps):
+        dt = 1.0 / fps if prev_fn is None else max(1, fn - prev_fn) / fps
+        out.append(kf.apply(kp, dt))
+        prev_fn = fn
+    return out
+
+
+# ── 수평반전 증강 ───────────────────────────────────────────
+# 펀치 종류(잽/크로스/훅/어퍼)는 손잡이와 무관하다 — 잽은 어느 손으로 쳐도
+# 잽이다. 좌우를 뒤집은 표본을 학습에 더하면 모델이 "LIM 의 왼손이 여기"
+# 같은 손잡이 단서를 외우지 못하고 동작 패턴 자체로 분류하게 된다. 결과:
+# 사우스포·거울모드·신규 사용자에 강건 (단일 복서 학습의 OOD '어퍼 폴백'
+# 완화 — 학습 표본도 사실상 2배).
+# COCO-17 좌우 대칭쌍 — 수평반전 시 교환할 인덱스.
+COCO_FLIP_IDX = [0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15]
+
+
+def flip_kp(kp):
+    """키포인트 (17,>=2) 수평반전 — 좌우 랜드마크 교환 + x 미러(1-x).
+
+    정규화 좌표(0~1) 가정. 다운스트림 피처는 어깨중심 기준 상대좌표라
+    미러 기준점(1.0)은 상쇄되므로 펀치 분류 결과에 치우침을 주지 않는다."""
+    kp = np.asarray(kp, dtype=float)
+    out = kp[COCO_FLIP_IDX].copy()
+    out[:, 0] = 1.0 - out[:, 0]
+    return out
+
+
+def flip_kp_sequence(kps):
+    """kp 시퀀스 전체를 수평반전.
+
+    1€ 필터는 수평반전과 가환이다 — 필터(1-x) = 1-필터(x) 가 정확히
+    성립(필터는 입력의 볼록결합). 따라서 평활이 끝난 시퀀스를 반전해도
+    '반전 후 평활'과 결과가 같아, load_kp_csv 출력을 그대로 증강에 써도
+    학습 분포가 일치한다."""
+    return [flip_kp(kp) for kp in kps]
+
+
 # ── CSV 로더 ────────────────────────────────────────────────
-def load_kp_csv(path):
-    """LIM_full_data*.csv → (frame_numbers list, kps list of (17,2) ndarray)."""
+def load_kp_csv(path, smooth=True, fps=DEFAULT_FPS):
+    """LIM_full_data*.csv → (frame_numbers list, kps list of (17,2) ndarray).
+
+    smooth=True 면 런타임 앱과 동일한 1€ 필터를 통과시켜 반환한다
+    (학습·평가·런타임 좌표 분포 일치 — 지터링 보정 포함)."""
     frame_nums, kps = [], []
     with open(path, newline='', encoding='utf-8') as f:
         for row in csv.DictReader(f):
@@ -134,6 +280,8 @@ def load_kp_csv(path):
                 kp[i, 1] = float(row[f'{name}_y'])
             frame_nums.append(int(row['frame_number']))
             kps.append(kp)
+    if smooth and kps:
+        kps = filter_kp_sequence(frame_nums, kps, fps)
     return frame_nums, kps
 
 
